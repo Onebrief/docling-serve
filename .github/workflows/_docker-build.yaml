@@ -32,6 +32,9 @@ on:
       pinned-version:
         value: ${{ jobs.build.outputs.pinned-version }}
 
+permissions:
+  contents: read
+
 jobs:
   build:
     name: Build amd64 (${{ inputs.image-name }})
