@@ -19,10 +19,11 @@ jobs:
       checks: write
       id-token: write
       security-events: write
-    uses: ./.github/workflows/_docker-build.yaml
+    uses: Onebrief/actions/.github/workflows/reusable-docker-build.yml@main
     with:
-      image-name: onebrief/docling-ob
+      repository: onebrief/docling-ob
       dockerfile: Dockerfile
       context: .
-      provenance: false
+      # Only build for amd64
+      platforms: '[{"arch":"amd64","runner":"stepsecurity-x64"}]'
     secrets: inherit
