@@ -4,7 +4,9 @@ from typing import Annotated, Any, Union, get_args, get_origin
 
 from pydantic import BaseModel
 
-from docling_serve.datamodel.convert import ConvertDocumentsRequestOptions
+from docling.datamodel.service.options import (
+    ConvertDocumentsOptions as ConvertDocumentsRequestOptions,
+)
 
 DOCS_FILE = "docs/usage.md"
 
@@ -27,6 +29,7 @@ VARIABLE_WORDS: list[str] = [
     "granite_docling",
     "model_spec",
     "engine_options",
+    "ocr_lang",
 ]
 
 

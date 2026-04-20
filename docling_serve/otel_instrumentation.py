@@ -15,15 +15,16 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.sdk.trace.sampling import Decision, Sampler, SamplingResult
 from opentelemetry.trace import SpanKind
 from opentelemetry.util.types import Attributes
-from prometheus_client import REGISTRY
+from prometheus_client import REGISTRY, start_http_server
 from redis import Redis
 
+from docling_serve.ray_metrics_collector import RayCollector
 from docling_serve.rq_metrics_collector import RQCollector
 
 logger = logging.getLogger(__name__)
 
 
-FILTERED_PATHS = {"/metrics", "/health", "/healthz", "/readyz", "/livez"}
+FILTERED_PATHS = {"/metrics", "/health", "/healthz", "/ready", "/readyz", "/livez"}
 
 
 class HealthMetricsFilterSampler(Sampler):
@@ -68,6 +69,8 @@ def setup_otel_instrumentation(
     enable_prometheus: bool = True,
     enable_otlp_metrics: bool = False,
     redis_url: str | None = None,
+    metrics_port: int | None = None,
+    ray_redis_manager=None,
 ):
     """
     Set up OpenTelemetry instrumentation for FastAPI app.
@@ -80,6 +83,8 @@ def setup_otel_instrumentation(
         enable_prometheus: Enable Prometheus metrics export
         enable_otlp_metrics: Enable OTLP metrics export (for OTEL collector)
         redis_url: Redis URL for RQ metrics (if using RQ engine)
+        metrics_port: If set, start a separate HTTP server on this port for /metrics
+        ray_redis_manager: RedisStateManager instance for Ray metrics (if using Ray engine)
     """
     resource = Resource(attributes={SERVICE_NAME: service_name})
 
@@ -115,15 +120,36 @@ def setup_otel_instrumentation(
             )
             metrics.set_meter_provider(meter_provider)
 
-    # Instrument FastAPI
-    logger.info("Instrumenting FastAPI with OpenTelemetry")
-    FastAPIInstrumentor.instrument_app(app)
+        if metrics_port:
+            try:
+                start_http_server(metrics_port)
+                logger.info(f"Serving metrics on port {metrics_port}")
+            except OSError as e:
+                raise RuntimeError(
+                    f"Failed to start metrics server on port {metrics_port}: {e}"
+                ) from e
+
+    # Instrument FastAPI - use excluded_urls to suppress both traces AND metrics
+    # for health/readiness/metrics endpoints. The custom sampler above only filters
+    # trace spans
+    # Patterns are anchored with $ to avoid matching substrings like /healthcheck.
+    excluded_urls = ",".join(f"{p}$" for p in FILTERED_PATHS)
+    logger.info(
+        "Instrumenting FastAPI with OpenTelemetry (excluded_urls=%s)",
+        excluded_urls,
+    )
+    FastAPIInstrumentor.instrument_app(app, excluded_urls=excluded_urls)
 
     # Register RQ metrics if Redis URL is provided
     if redis_url and enable_prometheus:
         logger.info(f"Registering RQ metrics collector for Redis at {redis_url}")
         connection = Redis.from_url(redis_url)
         REGISTRY.register(RQCollector(connection))
+
+    # Register Ray metrics if RedisStateManager is provided
+    if ray_redis_manager and enable_prometheus:
+        logger.info("Registering Ray metrics collector")
+        REGISTRY.register(RayCollector(ray_redis_manager))
 
 
 def get_metrics_endpoint_content():
