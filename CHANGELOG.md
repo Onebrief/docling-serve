@@ -1,3 +1,81 @@
+## [v1.16.1](https://github.com/docling-project/docling-serve/releases/tag/v1.16.1) - 2026-04-09
+
+### Fix
+
+* Downgrade torch for linux arm64 compatibility ([#572](https://github.com/docling-project/docling-serve/issues/572)) ([`590394e`](https://github.com/docling-project/docling-serve/commit/590394efde6a7cae05fb16959f002059bfb2091f))
+
+### Docling libraries included in this release:
+- docling 2.85.0
+- docling-core 2.72.0
+- docling-ibm-models 3.13.0
+- docling-jobkit 1.16.0
+- docling-mcp 1.3.4
+- docling-parse 5.8.0
+- docling-serve 1.16.1
+
+## [v1.16.0](https://github.com/docling-project/docling-serve/releases/tag/v1.16.0) - 2026-04-08
+
+### Feature
+
+* Experimental client SDK ([#571](https://github.com/docling-project/docling-serve/issues/571)) ([`c02d9f1`](https://github.com/docling-project/docling-serve/commit/c02d9f1c46fc20d6f1ba9279667e62cdeebc3ef4))
+* Add table structure preset configuration and extend manager settings ([#569](https://github.com/docling-project/docling-serve/issues/569)) ([`38c12ef`](https://github.com/docling-project/docling-serve/commit/38c12ef52ba6ff559465f8af80716ab58967718a))
+* Expose max_ongoing_requests per ray-serve replica ([#562](https://github.com/docling-project/docling-serve/issues/562)) ([`e2e86bf`](https://github.com/docling-project/docling-serve/commit/e2e86bf3f4ee5111af4605f6f391649be53ea321))
+* Redis connection gating on API server ([#561](https://github.com/docling-project/docling-serve/issues/561)) ([`e17f5c7`](https://github.com/docling-project/docling-serve/commit/e17f5c7a8f6bd680eec6c52dacecc2464c72b8be))
+* New ray orchestrator ([#557](https://github.com/docling-project/docling-serve/issues/557)) ([`453db67`](https://github.com/docling-project/docling-serve/commit/453db676ee859f7dce4e1ff8b6b14ee66efdf83e))
+* Add callbacks (#3) ([#555](https://github.com/docling-project/docling-serve/issues/555)) ([`ded6ca2`](https://github.com/docling-project/docling-serve/commit/ded6ca2ceb06aa12d45f637ff26acb783398ee6c))
+
+### Fix
+
+* Support dict fields in FormDepends for multipart form data ([#566](https://github.com/docling-project/docling-serve/issues/566)) ([`6a64f95`](https://github.com/docling-project/docling-serve/commit/6a64f9524115085c148f029cd75732e5e30de393))
+* Pre-import tesserocr in main thread to avoid cysignals thread error ([#564](https://github.com/docling-project/docling-serve/issues/564)) ([`3f31fa0`](https://github.com/docling-project/docling-serve/commit/3f31fa0a42695d729f476b05606a1fa894b3d385))
+* Single-use result deletion via orchestrator lifecycle hooks ([#560](https://github.com/docling-project/docling-serve/issues/560)) ([`92f7f75`](https://github.com/docling-project/docling-serve/commit/92f7f75561b3221ad8525d9852f3dc540d4a5293))
+
+### Docling libraries included in this release:
+- docling 2.85.0
+- docling-core 2.72.0
+- docling-ibm-models 3.13.0
+- docling-jobkit 1.16.0
+- docling-mcp 1.3.4
+- docling-parse 5.8.0
+- docling-serve 1.16.0
+
+## [v1.15.1](https://github.com/docling-project/docling-serve/releases/tag/v1.15.1) - 2026-03-26
+
+### Fix
+
+* Docling pypdfium and parser updates ([#553](https://github.com/docling-project/docling-serve/issues/553)) ([`34b9157`](https://github.com/docling-project/docling-serve/commit/34b915773253a00e0a480ac9048e19893912b4ba))
+
+### Docling libraries included in this release:
+- docling 2.82.0
+- docling-core 2.70.2
+- docling-ibm-models 3.12.0
+- docling-jobkit 1.14.0
+- docling-mcp 1.3.4
+- docling-parse 5.6.1
+- docling-serve 1.15.1
+
+## [v1.15.0](https://github.com/docling-project/docling-serve/releases/tag/v1.15.0) - 2026-03-23
+
+### Feature
+
+* Update Docling to 2.81.0 ([#547](https://github.com/docling-project/docling-serve/issues/547)) ([`4fe4f4e`](https://github.com/docling-project/docling-serve/commit/4fe4f4ef8443862efa3661ee8645a5ee3b60f17b))
+* Add config options for presets and allow yaml config file ([#546](https://github.com/docling-project/docling-serve/issues/546)) ([`7b7a7d9`](https://github.com/docling-project/docling-serve/commit/7b7a7d9543c6db209514d2a02fe77c925c3dc27f))
+* Serve metrics on separate port ([#544](https://github.com/docling-project/docling-serve/issues/544)) ([`e2f23de`](https://github.com/docling-project/docling-serve/commit/e2f23de4eac481090c5319e5a47e6aa638f25ab5))
+* Ready endpoint for API pods ([#538](https://github.com/docling-project/docling-serve/issues/538)) ([`0276ef1`](https://github.com/docling-project/docling-serve/commit/0276ef1f5afc6e51fd5dc35154d6fb0b1f83af23))
+
+### Fix
+
+* Drop otel metrics for excluded endpoints ([#534](https://github.com/docling-project/docling-serve/issues/534)) ([`6bdb222`](https://github.com/docling-project/docling-serve/commit/6bdb222d7a95d93c3067bd75cdb1d13cebff7bd1))
+
+### Docling libraries included in this release:
+- docling 2.81.0
+- docling-core 2.70.2
+- docling-ibm-models 3.12.0
+- docling-jobkit 1.14.0
+- docling-mcp 1.3.4
+- docling-parse 5.6.0
+- docling-serve 1.15.0
+
 ## [v1.14.3](https://github.com/docling-project/docling-serve/releases/tag/v1.14.3) - 2026-03-05
 
 ### Fix

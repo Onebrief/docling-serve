@@ -20,8 +20,10 @@ from fastapi import (
     Depends,
     FastAPI,
     Form,
+    Header,
     HTTPException,
     Query,
+    Request,
     UploadFile,
     WebSocket,
     WebSocketDisconnect,
@@ -37,33 +39,21 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from scalar_fastapi import get_scalar_api_reference
 
-from docling.datamodel.base_models import DocumentStream, InputFormat
-from docling_jobkit.datamodel.callback import (
+from docling.datamodel.base_models import DocumentStream
+from docling.datamodel.service.callbacks import (
+    CallbackSpec,
     ProgressCallbackRequest,
     ProgressCallbackResponse,
 )
-from docling_jobkit.datamodel.chunking import (
+from docling.datamodel.service.chunking import (
     BaseChunkerOptions,
-    ChunkingExportOptions,
     HierarchicalChunkerOptions,
     HybridChunkerOptions,
 )
-from docling_jobkit.datamodel.http_inputs import FileSource, HttpSource
-from docling_jobkit.datamodel.s3_coords import S3Coordinates
-from docling_jobkit.datamodel.task import Task, TaskSource, TaskType
-from docling_jobkit.datamodel.task_targets import (
-    InBodyTarget,
-    ZipTarget,
+from docling.datamodel.service.options import (
+    ConvertDocumentsOptions as ConvertDocumentsRequestOptions,
 )
-from docling_jobkit.orchestrators.base_orchestrator import (
-    BaseOrchestrator,
-    ProgressInvalid,
-    TaskNotFoundError,
-)
-
-from docling_serve.auth import APIKeyAuth, AuthenticationResult
-from docling_serve.datamodel.convert import ConvertDocumentsRequestOptions
-from docling_serve.datamodel.requests import (
+from docling.datamodel.service.requests import (
     ConvertDocumentsRequest,
     FileSourceRequest,
     GenericChunkDocumentsRequest,
@@ -73,13 +63,14 @@ from docling_serve.datamodel.requests import (
     TargetRequest,
     make_request_model,
 )
-from docling_serve.datamodel.responses import (
+from docling.datamodel.service.responses import (
     ChunkDocumentResponse,
     ClearResponse,
     ConvertDocumentResponse,
     HealthCheckResponse,
     MessageKind,
     PresignedUrlConvertDocumentResponse,
+    ReadinessResponse,
     TaskStatusResponse,
     WebsocketMessage,
     DocItem,
@@ -87,19 +78,48 @@ from docling_serve.datamodel.responses import (
     ChunkResponse,
     ChunkResponses
 )
+from docling.datamodel.service.sources import FileSource, HttpSource, S3Coordinates
+from docling.datamodel.service.targets import (
+    InBodyTarget,
+    ZipTarget,
+)
+from docling.datamodel.service.tasks import TaskType
+from docling_jobkit.datamodel.chunking import ChunkingExportOptions
+from docling_jobkit.datamodel.task import Task, TaskSource
+from docling_jobkit.orchestrators.base_orchestrator import (
+    BaseOrchestrator,
+    ProgressInvalid,
+    RedisBackpressureError,
+    TaskNotFoundError,
+)
+from docling_jobkit.orchestrators.rq.orchestrator import RQOrchestrator
+
+from docling_serve.auth import APIKeyAuth, AuthenticationResult
 from docling_serve.helper_functions import DOCLING_VERSIONS, FormDepends, create_upload_file
 from docling_serve.orchestrator_factory import get_async_orchestrator
 from docling_serve.otel_instrumentation import (
     get_metrics_endpoint_content,
     setup_otel_instrumentation,
 )
+from docling_serve.policy import (
+    build_service_policy,
+    normalize_convert_options,
+    normalize_convert_request,
+    validate_chunk_request,
+    validate_convert_options,
+    validate_convert_request,
+)
 from docling_serve.response_preparation import prepare_response
 from docling_serve.settings import AsyncEngine, docling_serve_settings
 from docling_serve.storage import get_scratch
 from docling_serve.websocket_notifier import WebsocketNotifier
 
-from docling.chunking import HybridChunker
-from docling_core.transforms.chunker.tokenizer.huggingface import HuggingFaceTokenizer
+# Pre-import OCR backends that use cysignals (signal handlers must be registered
+# in the main thread; worker threads would raise "signal only works in main thread").
+try:
+    import tesserocr  # noqa: F401
+except (ImportError, Exception):
+    pass
 
 
 # Set up custom logging as we'll be intermixes with FastAPI/Uvicorn's logging
@@ -140,6 +160,11 @@ for handler in root_logger.handlers:  # Iterate through existing handlers
 
 _log = logging.getLogger(__name__)
 
+# Tracks whether warm_up_caches() has completed.  Meaningful only for the
+# LocalOrchestrator (which eagerly loads ML models); the RQ orchestrator's
+# implementation is a no-op so this event fires instantly in RQ deployments.
+_models_ready = asyncio.Event()
+
 
 # Context manager to initialize and clean up the lifespan of the FastAPI app
 @asynccontextmanager
@@ -150,7 +175,8 @@ async def lifespan(app: FastAPI):
     notifier = WebsocketNotifier(orchestrator)
     orchestrator.bind_notifier(notifier)
 
-    # Warm up processing cache using our default options (tesserocr)
+    # Warm up processing cache (loads ML models for LocalOrchestrator;
+    # no-op for RQOrchestrator since models live in the worker pods).
     if docling_serve_settings.load_models_at_boot:
         pdf_format_option = orchestrator.cm.get_pdf_pipeline_opts(
             ConvertDocumentsRequestOptions()
@@ -158,17 +184,14 @@ async def lifespan(app: FastAPI):
         converter = orchestrator.cm.get_converter(pdf_format_option)
         converter.initialize_pipeline(InputFormat.PDF)
 
+    _models_ready.set()
+
     # Start the background queue processor
     queue_task = asyncio.create_task(orchestrator.process_queue())
 
     reaper_task = None
-    if hasattr(orchestrator, "_reap_zombie_tasks"):
-        reaper_task = asyncio.create_task(
-            orchestrator._reap_zombie_tasks(
-                interval=docling_serve_settings.zombie_reaper_interval,
-                max_age=docling_serve_settings.zombie_reaper_max_age,
-            )
-        )
+    if isinstance(orchestrator, RQOrchestrator):
+        reaper_task = asyncio.create_task(orchestrator._reap_zombie_tasks())
 
     yield
 
@@ -213,6 +236,7 @@ def create_app():  # noqa: C901
         _log.info("Found static assets.")
 
     require_auth = APIKeyAuth(docling_serve_settings.api_key)
+    service_policy = build_service_policy(docling_serve_settings)
     app = FastAPI(
         title="Docling Serve",
         docs_url=None if offline_docs_assets else "/swagger",
@@ -221,12 +245,49 @@ def create_app():  # noqa: C901
         version=version,
     )
 
+    @app.exception_handler(RedisBackpressureError)
+    async def redis_backpressure_error_handler(
+        request: Request, exc: RedisBackpressureError
+    ) -> JSONResponse:
+        del request, exc
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"detail": "Server is busy, please try again shortly."},
+            headers={"Retry-After": "1"},
+        )
+
+    if docling_serve_settings.eng_kind == AsyncEngine.RAY:
+        from docling_jobkit.orchestrators.ray.orchestrator import (
+            DispatcherUnavailableError,
+        )
+
+        @app.exception_handler(DispatcherUnavailableError)
+        async def dispatcher_unavailable_error_handler(
+            request: Request, exc: Exception
+        ) -> JSONResponse:
+            del request
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"detail": str(exc) or "Ray dispatcher is unavailable."},
+                headers={"Retry-After": "1"},
+            )
+
     # Setup OpenTelemetry instrumentation
     redis_url = (
         docling_serve_settings.eng_rq_redis_url
         if docling_serve_settings.eng_kind == AsyncEngine.RQ
         else None
     )
+
+    # Get Ray redis_manager if using Ray engine
+    ray_redis_manager = None
+    if docling_serve_settings.eng_kind == AsyncEngine.RAY:
+        from docling_jobkit.orchestrators.ray.orchestrator import RayOrchestrator
+
+        orchestrator = get_async_orchestrator()
+        assert isinstance(orchestrator, RayOrchestrator)
+        ray_redis_manager = orchestrator.redis_manager
+
     setup_otel_instrumentation(
         app,
         service_name=docling_serve_settings.otel_service_name,
@@ -235,6 +296,8 @@ def create_app():  # noqa: C901
         enable_prometheus=docling_serve_settings.otel_enable_prometheus,
         enable_otlp_metrics=docling_serve_settings.otel_enable_otlp_metrics,
         redis_url=redis_url,
+        metrics_port=docling_serve_settings.metrics_port,
+        ray_redis_manager=ray_redis_manager,
     )
 
     origins = docling_serve_settings.cors_origins
@@ -330,6 +393,7 @@ def create_app():  # noqa: C901
     async def _enque_source(
         orchestrator: BaseOrchestrator,
         request: ConvertDocumentsRequest | GenericChunkDocumentsRequest,
+        tenant_id: str | None = None,
     ) -> Task:
         sources: list[TaskSource] = []
         for s in request.sources:
@@ -357,6 +421,17 @@ def create_app():  # noqa: C901
         else:
             raise RuntimeError("Uknown request type.")
 
+        # Prepare metadata with tenant_id BEFORE enqueueing
+        # This is critical because ray orchestrator reads tenant_id during enqueue()
+        metadata = {}
+        if tenant_id:
+            metadata["tenant_id"] = tenant_id
+            _log.info(
+                f"[TENANT_ID] Preparing to enqueue with tenant_id='{tenant_id}' in metadata"
+            )
+        else:
+            _log.warning("[TENANT_ID] No tenant_id provided, will use default")
+
         task = await orchestrator.enqueue(
             task_type=task_type,
             sources=sources,
@@ -364,7 +439,14 @@ def create_app():  # noqa: C901
             chunking_options=chunking_options,
             chunking_export_options=chunking_export_options,
             target=request.target,
+            callbacks=request.callbacks,
+            metadata=metadata,
         )
+
+        _log.info(
+            f"[TENANT_ID] Task {task.task_id} created with tenant_id='{tenant_id or 'default'}'"
+        )
+
         return task
 
     async def _enque_file(
@@ -375,8 +457,13 @@ def create_app():  # noqa: C901
         chunking_options: BaseChunkerOptions | None,
         chunking_export_options: ChunkingExportOptions | None,
         target: TargetRequest,
+        callbacks: list[CallbackSpec] | None = None,
+        tenant_id: str | None = None,
     ) -> Task:
-        _log.info(f"Received {len(files)} files for processing.")
+        _log.info(
+            f"[TENANT_ID] _enque_file called with tenant_id='{tenant_id}', "
+            f"processing {len(files)} files"
+        )
 
         # Load the uploaded files to Docling DocumentStream
         file_sources: list[TaskSource] = []
@@ -395,6 +482,11 @@ def create_app():  # noqa: C901
 
             file_sources.append(DocumentStream(name=name, stream=buf))
 
+        # Prepare metadata with tenant_id BEFORE enqueueing
+        metadata = {}
+        if tenant_id:
+            metadata["tenant_id"] = tenant_id
+
         task = await orchestrator.enqueue(
             task_type=task_type,
             sources=file_sources,
@@ -402,8 +494,24 @@ def create_app():  # noqa: C901
             chunking_options=chunking_options,
             chunking_export_options=chunking_export_options,
             target=target,
+            callbacks=callbacks or [],
+            metadata=metadata,
         )
+
+        _log.info(
+            f"[TENANT_ID] File task {task.task_id} created with tenant_id='{tenant_id or 'default'}'"
+        )
+
         return task
+
+    def _get_tenant_id_from_header(tenant_id_header: str | None) -> str:
+        """Extract tenant_id from header or return default."""
+        tenant_id = tenant_id_header or "default"
+        _log.info(
+            f"[TENANT_ID] Extracted tenant_id from header: '{tenant_id}' "
+            f"(header_value: '{tenant_id_header}')"
+        )
+        return tenant_id
 
     async def _wait_task_complete(orchestrator: BaseOrchestrator, task_id: str) -> bool:
         start_time = time.monotonic()
@@ -415,6 +523,34 @@ def create_app():  # noqa: C901
             elapsed_time = time.monotonic() - start_time
             if elapsed_time > docling_serve_settings.max_sync_wait:
                 return False
+
+    def _prepare_convert_request(
+        request: ConvertDocumentsRequest,
+    ) -> ConvertDocumentsRequest:
+        normalized_request = normalize_convert_request(request, service_policy)
+        validate_convert_request(normalized_request, service_policy)
+        return normalized_request
+
+    def _prepare_chunk_request(
+        request: GenericChunkDocumentsRequest,
+    ) -> GenericChunkDocumentsRequest:
+        normalized_request = request.model_copy(
+            update={
+                "convert_options": normalize_convert_options(
+                    request.convert_options, service_policy
+                )
+            },
+            deep=True,
+        )
+        validate_chunk_request(normalized_request, service_policy)
+        return normalized_request
+
+    def _prepare_convert_options(
+        options: ConvertDocumentsRequestOptions,
+    ) -> ConvertDocumentsRequestOptions:
+        normalized_options = normalize_convert_options(options, service_policy)
+        validate_convert_options(normalized_options, service_policy)
+        return normalized_options
 
     ##########################################
     # Downgrade openapi 3.1 to 3.0.x helpers #
@@ -507,6 +643,34 @@ def create_app():  # noqa: C901
     def ping() -> HealthCheckResponse:
         return HealthCheckResponse()
 
+    @app.get("/ready", tags=["health"])
+    async def readiness() -> ReadinessResponse:
+        # Gate on model loading (LocalOrchestrator only; instant for RQ).
+        if not _models_ready.is_set():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Models not yet loaded",
+            )
+
+        orchestrator = get_async_orchestrator()
+        try:
+            await orchestrator.check_connection()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc) or "Readiness check failed",
+            ) from exc
+
+        return ReadinessResponse()
+
+    @app.get("/readyz", tags=["health"], include_in_schema=False)
+    async def readyz() -> ReadinessResponse:
+        return await readiness()
+
+    @app.get("/livez", tags=["health"], include_in_schema=False)
+    async def livez() -> HealthCheckResponse:
+        return HealthCheckResponse()
+
     # API readiness compatibility for OpenShift AI Workbench
     @app.get("/api", include_in_schema=False)
     def api_check() -> HealthCheckResponse:
@@ -549,9 +713,15 @@ def create_app():  # noqa: C901
         auth: Annotated[AuthenticationResult, Depends(require_auth)],
         orchestrator: Annotated[BaseOrchestrator, Depends(get_async_orchestrator)],
         conversion_request: ConvertDocumentsRequest,
+        x_tenant_id: Annotated[
+            str | None, Header(alias=docling_serve_settings.eng_ray_tenant_id_header)
+        ] = None,
     ):
+        conversion_request = _prepare_convert_request(conversion_request)
+        tenant_id = _get_tenant_id_from_header(x_tenant_id)
+        _log.info(f"[TENANT_ID] process_url endpoint received tenant_id='{tenant_id}'")
         task = await _enque_source(
-            orchestrator=orchestrator, request=conversion_request
+            orchestrator=orchestrator, request=conversion_request, tenant_id=tenant_id
         )
         completed = await _wait_task_complete(
             orchestrator=orchestrator, task_id=task.task_id
@@ -598,7 +768,13 @@ def create_app():  # noqa: C901
             ConvertDocumentsRequestOptions, FormDepends(ConvertDocumentsRequestOptions)
         ],
         target_type: Annotated[TargetName, Form()] = TargetName.INBODY,
+        x_tenant_id: Annotated[
+            str | None, Header(alias=docling_serve_settings.eng_ray_tenant_id_header)
+        ] = None,
     ):
+        options = _prepare_convert_options(options)
+        tenant_id = _get_tenant_id_from_header(x_tenant_id)
+        _log.info(f"[TENANT_ID] process_file endpoint received tenant_id='{tenant_id}'")
         target = InBodyTarget() if target_type == TargetName.INBODY else ZipTarget()
         task = await _enque_file(
             task_type=TaskType.CONVERT,
@@ -608,6 +784,8 @@ def create_app():  # noqa: C901
             chunking_options=None,
             chunking_export_options=None,
             target=target,
+            callbacks=[],
+            tenant_id=tenant_id,
         )
         completed = await _wait_task_complete(
             orchestrator=orchestrator, task_id=task.task_id
@@ -644,9 +822,17 @@ def create_app():  # noqa: C901
         auth: Annotated[AuthenticationResult, Depends(require_auth)],
         orchestrator: Annotated[BaseOrchestrator, Depends(get_async_orchestrator)],
         conversion_request: ConvertDocumentsRequest,
+        x_tenant_id: Annotated[
+            str | None, Header(alias=docling_serve_settings.eng_ray_tenant_id_header)
+        ] = None,
     ):
+        conversion_request = _prepare_convert_request(conversion_request)
+        tenant_id = _get_tenant_id_from_header(x_tenant_id)
+        _log.info(
+            f"[TENANT_ID] process_url_async endpoint received tenant_id='{tenant_id}'"
+        )
         task = await _enque_source(
-            orchestrator=orchestrator, request=conversion_request
+            orchestrator=orchestrator, request=conversion_request, tenant_id=tenant_id
         )
         task_queue_position = await orchestrator.get_queue_position(
             task_id=task.task_id
@@ -675,7 +861,15 @@ def create_app():  # noqa: C901
             ConvertDocumentsRequestOptions, FormDepends(ConvertDocumentsRequestOptions)
         ],
         target_type: Annotated[TargetName, Form()] = TargetName.INBODY,
+        x_tenant_id: Annotated[
+            str | None, Header(alias=docling_serve_settings.eng_ray_tenant_id_header)
+        ] = None,
     ):
+        options = _prepare_convert_options(options)
+        tenant_id = _get_tenant_id_from_header(x_tenant_id)
+        _log.info(
+            f"[TENANT_ID] process_file_async endpoint received tenant_id='{tenant_id}'"
+        )
         target = InBodyTarget() if target_type == TargetName.INBODY else ZipTarget()
         task = await _enque_file(
             task_type=TaskType.CONVERT,
@@ -685,6 +879,8 @@ def create_app():  # noqa: C901
             chunking_options=None,
             chunking_export_options=None,
             target=target,
+            callbacks=[],
+            tenant_id=tenant_id,
         )
         task_queue_position = await orchestrator.get_queue_position(
             task_id=task.task_id
@@ -716,8 +912,19 @@ def create_app():  # noqa: C901
             auth: Annotated[AuthenticationResult, Depends(require_auth)],
             orchestrator: Annotated[BaseOrchestrator, Depends(get_async_orchestrator)],
             request: req_cls,
+            x_tenant_id: Annotated[
+                str | None,
+                Header(alias=docling_serve_settings.eng_ray_tenant_id_header),
+            ] = None,
         ):
-            task = await _enque_source(orchestrator=orchestrator, request=request)
+            request = _prepare_chunk_request(request)
+            tenant_id = _get_tenant_id_from_header(x_tenant_id)
+            _log.info(
+                f"[TENANT_ID] chunk_source_async ({path_name}) endpoint received tenant_id='{tenant_id}'"
+            )
+            task = await _enque_source(
+                orchestrator=orchestrator, request=request, tenant_id=tenant_id
+            )
             task_queue_position = await orchestrator.get_queue_position(
                 task_id=task.task_id
             )
@@ -769,7 +976,16 @@ def create_app():  # noqa: C901
                 TargetName,
                 Form(description="Specification for the type of output target."),
             ] = TargetName.INBODY,
+            x_tenant_id: Annotated[
+                str | None,
+                Header(alias=docling_serve_settings.eng_ray_tenant_id_header),
+            ] = None,
         ):
+            convert_options = _prepare_convert_options(convert_options)
+            tenant_id = _get_tenant_id_from_header(x_tenant_id)
+            _log.info(
+                f"[TENANT_ID] chunk_file_async ({path_name}) endpoint received tenant_id='{tenant_id}'"
+            )
             target = InBodyTarget() if target_type == TargetName.INBODY else ZipTarget()
             task = await _enque_file(
                 task_type=TaskType.CHUNK,
@@ -781,6 +997,8 @@ def create_app():  # noqa: C901
                     include_converted_doc=include_converted_doc
                 ),
                 target=target,
+                callbacks=[],
+                tenant_id=tenant_id,
             )
             task_queue_position = await orchestrator.get_queue_position(
                 task_id=task.task_id
@@ -811,8 +1029,19 @@ def create_app():  # noqa: C901
             auth: Annotated[AuthenticationResult, Depends(require_auth)],
             orchestrator: Annotated[BaseOrchestrator, Depends(get_async_orchestrator)],
             request: req_cls,
+            x_tenant_id: Annotated[
+                str | None,
+                Header(alias=docling_serve_settings.eng_ray_tenant_id_header),
+            ] = None,
         ):
-            task = await _enque_source(orchestrator=orchestrator, request=request)
+            request = _prepare_chunk_request(request)
+            tenant_id = _get_tenant_id_from_header(x_tenant_id)
+            _log.info(
+                f"[TENANT_ID] chunk_source ({path_name}) endpoint received tenant_id='{tenant_id}'"
+            )
+            task = await _enque_source(
+                orchestrator=orchestrator, request=request, tenant_id=tenant_id
+            )
             completed = await _wait_task_complete(
                 orchestrator=orchestrator, task_id=task.task_id
             )
@@ -882,7 +1111,16 @@ def create_app():  # noqa: C901
                 TargetName,
                 Form(description="Specification for the type of output target."),
             ] = TargetName.INBODY,
+            x_tenant_id: Annotated[
+                str | None,
+                Header(alias=docling_serve_settings.eng_ray_tenant_id_header),
+            ] = None,
         ):
+            convert_options = _prepare_convert_options(convert_options)
+            tenant_id = _get_tenant_id_from_header(x_tenant_id)
+            _log.info(
+                f"[TENANT_ID] chunk_file ({path_name}) endpoint received tenant_id='{tenant_id}'"
+            )
             target = InBodyTarget() if target_type == TargetName.INBODY else ZipTarget()
             task = await _enque_file(
                 task_type=TaskType.CHUNK,
@@ -894,6 +1132,8 @@ def create_app():  # noqa: C901
                     include_converted_doc=include_converted_doc
                 ),
                 target=target,
+                callbacks=[],
+                tenant_id=tenant_id,
             )
             completed = await _wait_task_complete(
                 orchestrator=orchestrator, task_id=task.task_id
@@ -1056,8 +1296,16 @@ def create_app():  # noqa: C901
         await websocket.accept()
 
         try:
-            # Get task status from Redis or RQ directly instead of checking in-memory registry
             task = await orchestrator.task_status(task_id=task_id)
+        except RedisBackpressureError:
+            await websocket.send_text(
+                WebsocketMessage(
+                    message=MessageKind.ERROR,
+                    error="Server is busy, please try again shortly.",
+                ).model_dump_json()
+            )
+            await websocket.close()
+            return
         except TaskNotFoundError:
             await websocket.send_text(
                 WebsocketMessage(
@@ -1106,6 +1354,17 @@ def create_app():  # noqa: C901
                 msg = await websocket.receive_text()
                 _log.debug(f"Received message: {msg}")
 
+        except RedisBackpressureError:
+            try:
+                await websocket.send_text(
+                    WebsocketMessage(
+                        message=MessageKind.ERROR,
+                        error="Server is busy, please try again shortly.",
+                    ).model_dump_json()
+                )
+                await websocket.close()
+            except Exception:
+                pass
         except WebSocketDisconnect:
             _log.info(f"WebSocket disconnected for job {task_id}")
 
