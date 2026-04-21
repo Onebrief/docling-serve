@@ -12,7 +12,7 @@ RUN /usr/bin/python -m uv venv /app/.venv
 
 # Install dependencies using lockfile for pinned versions
 RUN --mount=type=cache,target=/root/.cache/uv \
-    /usr/bin/python -m uv sync --frozen --python /app/.venv/bin/python --extra tesserocr --group cu126 --no-group dev --no-group pypi \
+    /usr/bin/python -m uv sync --frozen --python /app/.venv/bin/python --extra tesserocr --group cu128 --no-group dev --no-group pypi \
     && /usr/bin/python -m uv pip uninstall --python /app/.venv/bin/python rapidocr opencv-python opencv-python-headless \
     && /usr/bin/python -m uv pip install --python /app/.venv/bin/python opencv-python-headless \
     && /usr/bin/python -m uv pip install --python /app/.venv/bin/python "cryptography>=46.0.5" "pillow>=12.1.1"
@@ -50,10 +50,7 @@ ENV \
 # COPY --chown=65532:65532 .cache/docling/models ${DOCLING_SERVE_ARTIFACTS_PATH}
 
 COPY --chown=65532:65532 ./docling_serve ./docling_serve
-COPY --chown=65532:65532 --chmod=755 ./serve /usr/bin/serve
 
 USER nonroot
 
-EXPOSE 8080
-
-ENTRYPOINT ["/usr/bin/serve"]
+ENTRYPOINT ["docling-serve", "run"]
