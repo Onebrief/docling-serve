@@ -10,12 +10,18 @@ RUN /usr/bin/python -m pip install --no-cache-dir uv
 # Create a virtual environment
 RUN /usr/bin/python -m uv venv /app/.venv
 
-# Install dependencies using lockfile for pinned versions
+# Install dependencies using lockfile for pinned versions (deps only — source not yet present)
 RUN --mount=type=cache,target=/root/.cache/uv \
-    /usr/bin/python -m uv sync --frozen --python /app/.venv/bin/python --extra tesserocr --group cu128 --no-group dev --no-group pypi \
+    /usr/bin/python -m uv sync --frozen --python /app/.venv/bin/python --extra tesserocr --group cu128 --no-group dev --no-group pypi --no-install-project \
     && /usr/bin/python -m uv pip uninstall --python /app/.venv/bin/python rapidocr opencv-python opencv-python-headless \
     && /usr/bin/python -m uv pip install --python /app/.venv/bin/python opencv-python-headless \
     && /usr/bin/python -m uv pip install --python /app/.venv/bin/python "cryptography>=46.0.5" "pillow>=12.1.1"
+
+# Copy project source and install the docling_serve package itself (cheap vs. the deps layer above)
+COPY ./docling_serve ./docling_serve
+COPY ./README.md ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    /usr/bin/python -m uv pip install --python /app/.venv/bin/python --no-deps -e .
 
 # Download models in build stage (has shell available)
 ARG MODELS_LIST="layout tableformer"
@@ -48,8 +54,6 @@ ENV \
 
 # Copy pre-downloaded models from host (run customization/download_models.sh first)
 # COPY --chown=65532:65532 .cache/docling/models ${DOCLING_SERVE_ARTIFACTS_PATH}
-
-COPY --chown=65532:65532 ./docling_serve ./docling_serve
 
 USER nonroot
 
