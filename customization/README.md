@@ -131,3 +131,11 @@ python update_endpoint.py --endpoint-name docling-serve-2025-09-04-03-09-08 --en
 # or to create an endpoint config
 python update_endpoint.py --endpoint-name docling-serve-2025-09-04-03-09-08 --env dev|prod --image-version v1.13.1
 ```
+
+## Update uv lock
+# Create a local venv (uv picks up pyproject.toml automatically)
+uv venv
+# Re-resolve and rewrite uv.lock from pyproject.toml
+uv lock
+# (optional) install the same set of groups/extras the Dockerfile uses,so the local venv matches what lands in the image
+uv sync --extra tesserocr --group cu128 --no-group dev --no-group pypi
