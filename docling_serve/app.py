@@ -39,7 +39,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from scalar_fastapi import get_scalar_api_reference
 
-from docling.datamodel.base_models import DocumentStream
+from docling.datamodel.base_models import DocumentStream, InputFormat
 from docling.datamodel.service.callbacks import (
     CallbackSpec,
     ProgressCallbackRequest,
