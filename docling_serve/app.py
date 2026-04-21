@@ -73,10 +73,12 @@ from docling.datamodel.service.responses import (
     ReadinessResponse,
     TaskStatusResponse,
     WebsocketMessage,
+)
+from docling_serve.datamodel.responses import (
+    ChunkResponse,
+    ChunkResponses,
     DocItem,
     Provenance,
-    ChunkResponse,
-    ChunkResponses
 )
 from docling.datamodel.service.sources import FileSource, HttpSource, S3Coordinates
 from docling.datamodel.service.targets import (
