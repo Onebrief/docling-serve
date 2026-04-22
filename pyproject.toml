@@ -35,7 +35,7 @@ requires-python = ">=3.10"
 dependencies = [
     "docling>=2.88.0,<3.0.0",
     "docling-core>=2.65.1",
-    "docling-jobkit[kfp,rq,ray,vlm]>=1.17.1,<2.0.0",
+    "docling-jobkit[kfp,rq]>=1.17.1,<2.0.0",
     "fastapi[standard]<0.130.0",  # ~=0.115
     "httpx~=0.28",
     "pydantic~=2.10",
