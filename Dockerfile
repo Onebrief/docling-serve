@@ -15,6 +15,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     /usr/bin/python -m uv sync --frozen --python /app/.venv/bin/python --extra tesserocr --group cu128 --no-group dev --no-group pypi --no-install-project \
     && /usr/bin/python -m uv pip uninstall --python /app/.venv/bin/python rapidocr opencv-python opencv-python-headless \
     && /usr/bin/python -m uv pip install --python /app/.venv/bin/python opencv-python-headless \
+    && find /app/.venv -name "libcrypto*.so*" -path "*/opencv_python_headless*" -delete \
+    && find /app/.venv -name "libssl*.so*" -path "*/opencv_python_headless*" -delete \
     && /usr/bin/python -m uv pip install --python /app/.venv/bin/python "cryptography>=46.0.5" "pillow>=12.1.1"
 
 # Copy project source and install the docling_serve package itself (cheap vs. the deps layer above)
