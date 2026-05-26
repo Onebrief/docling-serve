@@ -54,7 +54,7 @@ jobs:
       ENDPOINTS: >-
         {
           "amd64": "a423fbf740aca40178ed67aebc900b08-507af52079128d7f.elb.us-east-1.amazonaws.com",
-          "arm64": "aedf4c75985b14e429f22f0a7f2663cd-c7671c3cb1073c7c.elb.us-east-1.amazonaws.com"
+          "arm64": "ae269498b1f714f75afeff5d6806c6ab-5405620bf7022a68.elb.us-east-1.amazonaws.com"
         }
     outputs:
       digestsid: ${{ steps.setout.outputs.digestsid }}
