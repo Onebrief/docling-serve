@@ -11,12 +11,13 @@
 # ffmpeg CVEs) at the cost of video IO and cv2.HTTPS, neither of which docling
 # uses — cv2 is only exercised for image decode/encode/resize on raw bytes.
 #
-# We build on the official python:3.13-bookworm-slim image because the
-# Chainguard python-fips runtime doesn't have a C++ toolchain and its `apk`
-# fails on the FIPS container's TLS stack. Debian bookworm's glibc (2.36) is
+# We build on the official python:3.13-bookworm image because the Chainguard
+# python-fips runtime doesn't have a C++ toolchain and its `apk` fails on the
+# FIPS container's TLS stack. Debian bookworm's glibc (2.36) is
 # backward-compatible with Wolfi's newer glibc, so binaries built here load
-# cleanly in the release stage.
-FROM nexus.int.onebrief.tools/docker.io/library/python:3.13-slim-bookworm AS opencv-builder
+# cleanly in the release stage. The non-slim variant is used because the slim
+# tag has been quarantined in Nexus IQ; size doesn't matter for a builder stage.
+FROM nexus.int.onebrief.tools/docker.io/library/python:3.13-bookworm AS opencv-builder
 # Install the packages the cv2 compile link-checks against. Keep this line
 # stable — adding packages here invalidates the `pip wheel` layer below and
 # triggers a ~20-min OpenCV recompile.
