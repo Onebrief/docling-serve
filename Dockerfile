@@ -50,7 +50,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         liblerc4 \
     && rm -rf /var/lib/apt/lists/*
 
-FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:3.13.13-dev AS build
+FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:3.13.13-r3-dev AS build
 ENV UV_COMPILE_BYTECODE=0 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=0
 
 WORKDIR /app
@@ -89,7 +89,7 @@ RUN HF_HUB_DOWNLOAD_TIMEOUT="90" \
 
 # Multistage release build
 
-FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:3.13.13 AS release
+FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:3.13.13-r3 AS release
 
 WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 \
