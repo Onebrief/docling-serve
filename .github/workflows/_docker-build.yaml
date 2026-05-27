@@ -77,23 +77,35 @@ jobs:
           username: ${{ vars.NEXUS_USER }}
           password: ${{ secrets.NEXUS_PASS }}
 
-      - name: Probe apk inside python-fips-dev (CI sanity check)
+      - name: Probe Wolfi lib layout (dev + runtime)
         if: matrix.arch == 'amd64'
         run: |
           docker pull nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:3.13.13-r3-dev
+          docker pull nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:3.13.13-r3
+          echo "########## DEV IMAGE: codec .so files after apk install ##########"
           docker run --rm --entrypoint sh --user 0 \
             nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:3.13.13-r3-dev \
             -c '
               apk update >/dev/null 2>&1
-              for term in cmake libpng libjpeg libtiff tiff libwebp webp zlib; do
-                echo "=== apk search ${term} ==="
-                apk search "${term}" 2>&1 | sort -u | head -15
-                echo
+              apk add --no-cache cmake libpng-dev libjpeg-turbo-dev tiff-dev zlib-dev libwebp-dev >/dev/null 2>&1
+              echo "--- /usr/lib/ codec libs (after apk install) ---"
+              ls -la /usr/lib/ 2>/dev/null | grep -Ei "(png|jpeg|tiff|webp|zlib|jbig|lzma|zstd|deflate|lerc|sharpyuv)" || echo "(none)"
+              echo
+              echo "--- pkg-config of installed dev libs ---"
+              for p in libpng libjpeg libtiff-4 libwebp zlib; do
+                printf "%-12s " "$p"
+                pkg-config --modversion "$p" 2>/dev/null || echo "(missing)"
               done
-              echo "=== apk add --simulate (candidate set, with -static fallbacks) ==="
-              apk add --simulate cmake libpng-dev libjpeg-turbo-dev tiff-dev zlib-dev libwebp-dev 2>&1 | tail -30 || true
-              exit 0
             '
+          echo
+          echo "########## RUNTIME IMAGE: what is already present in /usr/lib ##########"
+          docker run --rm --entrypoint sh --user 0 \
+            nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:3.13.13-r3 \
+            -c '
+              echo "--- /usr/lib/ codec libs already in release image ---"
+              ls -la /usr/lib/ 2>/dev/null | grep -Ei "(png|jpeg|tiff|webp|zlib|jbig|lzma|zstd|deflate|lerc|sharpyuv)" || echo "(none)"
+            '
+          exit 0
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 #v3.11.1
