@@ -84,17 +84,14 @@ jobs:
           docker run --rm --entrypoint sh --user 0 \
             nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:3.13.13-r3-dev \
             -c '
-              echo "=== toolchain presence ==="
-              for t in gcc g++ cmake make pkg-config apk; do
-                printf "%-12s " "$t"
-                command -v "$t" || echo MISSING
+              apk update >/dev/null 2>&1
+              for term in cmake libpng libjpeg libtiff tiff libwebp webp zlib; do
+                echo "=== apk search ${term} ==="
+                apk search "${term}" 2>&1 | sort -u | head -15
+                echo
               done
-              echo
-              echo "=== apk update ==="
-              apk update 2>&1 | tail -20 || true
-              echo
-              echo "=== apk add --simulate (codec dev libs + cmake) ==="
-              apk add --simulate cmake libpng-dev libjpeg-turbo-dev libtiff-dev zlib-dev libwebp-dev 2>&1 | tail -30 || true
+              echo "=== apk add --simulate (candidate set, with -static fallbacks) ==="
+              apk add --simulate cmake libpng-dev libjpeg-turbo-dev tiff-dev zlib-dev libwebp-dev 2>&1 | tail -30 || true
               exit 0
             '
 
