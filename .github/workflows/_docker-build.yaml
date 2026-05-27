@@ -77,6 +77,27 @@ jobs:
           username: ${{ vars.NEXUS_USER }}
           password: ${{ secrets.NEXUS_PASS }}
 
+      - name: Probe apk inside python-fips-dev (CI sanity check)
+        if: matrix.arch == 'amd64'
+        run: |
+          docker pull nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:3.13.13-r3-dev
+          docker run --rm --entrypoint sh --user 0 \
+            nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:3.13.13-r3-dev \
+            -c '
+              echo "=== toolchain presence ==="
+              for t in gcc g++ cmake make pkg-config apk; do
+                printf "%-12s " "$t"
+                command -v "$t" || echo MISSING
+              done
+              echo
+              echo "=== apk update ==="
+              apk update 2>&1 | tail -20 || true
+              echo
+              echo "=== apk add --simulate (codec dev libs + cmake) ==="
+              apk add --simulate cmake libpng-dev libjpeg-turbo-dev libtiff-dev zlib-dev libwebp-dev 2>&1 | tail -30 || true
+              exit 0
+            '
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 #v3.11.1
         with:
