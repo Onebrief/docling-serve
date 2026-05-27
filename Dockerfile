@@ -47,6 +47,7 @@ RUN pip wheel --no-binary opencv-python-headless \
         -w /out
 
 FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:3.13.13-r3-dev AS build
+ARG TARGETARCH
 ENV UV_COMPILE_BYTECODE=0 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=0
 
 WORKDIR /app
@@ -63,11 +64,20 @@ RUN /usr/bin/python -m uv venv /app/.venv
 # We swap the PyPI opencv-python-headless wheel for our FIPS-clean rebuild (see opencv-builder
 # stage above), and pin cryptography + pillow to CVE-patched versions. rapidocr stays in as our
 # OCR engine: ONNX-based, no cysignals, FIPS-safe.
+#
+# Arch split: amd64 uses CUDA (cu128 torch group + onnxruntime-gpu); arm64 is
+# CPU-only because onnxruntime-gpu publishes no aarch64 wheels and the realistic
+# arm64 deploy targets (Graviton/Ampere) have no NVIDIA GPUs anyway.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    /usr/bin/python -m uv sync --frozen --python /app/.venv/bin/python --group cu128 --no-group dev --no-group pypi --no-install-project \
+    if [ "$TARGETARCH" = "arm64" ]; then \
+        TORCH_GROUP=cpu; ORT_PKG=onnxruntime; \
+    else \
+        TORCH_GROUP=cu128; ORT_PKG=onnxruntime-gpu; \
+    fi \
+    && /usr/bin/python -m uv sync --frozen --python /app/.venv/bin/python --group "$TORCH_GROUP" --no-group dev --no-group pypi --no-install-project \
     && /usr/bin/python -m uv pip uninstall --python /app/.venv/bin/python opencv-python opencv-python-headless \
     && /usr/bin/python -m uv pip install --python /app/.venv/bin/python /tmp/opencv_python_headless-*.whl \
-    && /usr/bin/python -m uv pip install --python /app/.venv/bin/python "onnxruntime-gpu>=1.19.0" \
+    && /usr/bin/python -m uv pip install --python /app/.venv/bin/python "${ORT_PKG}>=1.19.0" \
     && /usr/bin/python -m uv pip install --python /app/.venv/bin/python "cryptography>=46.0.5" "pillow>=12.1.1"
 
 # Copy project source and install the docling_serve package itself (cheap vs. the deps layer above)
