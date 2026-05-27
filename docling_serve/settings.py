@@ -1,17 +1,20 @@
 import enum
 import json
+import logging
 import sys
 from pathlib import Path
 from typing import Any, Optional, Union
 
 import yaml
-from pydantic import AnyUrl, Field, field_validator, model_validator
+from pydantic import AliasChoices, AnyUrl, Field, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
     SettingsConfigDict,
 )
 from typing_extensions import Self
+
+_log = logging.getLogger(__name__)
 
 
 class UvicornSettings(BaseSettings):
@@ -65,7 +68,9 @@ class YamlConfigSettingsSource(PydanticBaseSettingsSource):
 
         config_path = Path(config_path_str)
         if not config_path.exists():
-            return {}
+            raise FileNotFoundError(
+                f"Config file not found: {config_path}. Fix the environment variable DOCLING_SERVE_CONFIG_FILE or unset it."
+            )
 
         try:
             with open(config_path) as f:
@@ -74,10 +79,17 @@ class YamlConfigSettingsSource(PydanticBaseSettingsSource):
                 elif config_path.suffix == ".json":
                     data = json.load(f)
                 else:
-                    return {}
-            return data if isinstance(data, dict) else {}
-        except Exception:
-            return {}
+                    raise ValueError(
+                        f"Unsupported config file format: {config_path.suffix}. Only .yaml, .yml, and .json are supported."
+                    )
+            if not isinstance(data, dict):
+                raise ValueError(
+                    f"Config file must contain a dictionary/object, got {type(data).__name__}"
+                )
+            return data
+        except Exception as err:
+            _log.error(f"Error parsing the config file {config_path}")
+            raise RuntimeError(f"Failed to parse config file {config_path}") from err
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}()"
@@ -86,6 +98,7 @@ class YamlConfigSettingsSource(PydanticBaseSettingsSource):
 class DoclingServeSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="DOCLING_SERVE_",
+        env_prefix_target="all",
         env_file=".env",
         env_parse_none_str="",
         extra="allow",
@@ -114,6 +127,7 @@ class DoclingServeSettings(BaseSettings):
     allow_custom_ocr_config: bool = False
     show_version_info: bool = True
     enable_management_endpoints: bool = False
+    debug_error_details: bool = False
 
     api_key: str = ""
 
@@ -186,7 +200,8 @@ class DoclingServeSettings(BaseSettings):
     eng_ray_sub_channel: str = "docling:ray:updates"
 
     # Fair Dispatcher
-    eng_ray_dispatcher_interval: float = 2.0
+    eng_ray_dispatcher_interval: float = 30.0
+    eng_ray_supervisor_poll_interval: float = 5.0
 
     # Per-User Dispatcher Limits
     eng_ray_max_concurrent_tasks: int = 5
@@ -213,7 +228,27 @@ class DoclingServeSettings(BaseSettings):
     eng_ray_max_ongoing_requests_per_replica: Optional[int] = None
     eng_ray_upscale_delay_s: float = 30.0
     eng_ray_downscale_delay_s: float = 600.0
-    eng_ray_num_cpus_per_actor: float = 1.0
+    # None -> use Ray Serve defaults.
+    eng_ray_graceful_shutdown_wait_loop_s: Optional[float] = None
+    eng_ray_graceful_shutdown_timeout_s: Optional[float] = None
+    eng_ray_converter_actor_num_cpus: float = Field(
+        1.0,
+        validation_alias=AliasChoices(
+            "eng_ray_converter_actor_num_cpus",
+            "eng_ray_num_cpus_per_actor",
+        ),
+    )
+    eng_ray_enable_pdf_page_slice_fanout: bool = False
+    eng_ray_max_page_slice_size: int = 32
+    # Unset means "default to eng_ray_max_concurrent_tasks" at runtime.
+    # Explicit values override that default but fan-out should never be unbounded.
+    eng_ray_max_page_slice_parallelism: Optional[int] = None
+    eng_ray_coordinator_min_actors: Optional[int] = None
+    eng_ray_coordinator_max_actors: Optional[int] = None
+    eng_ray_coordinator_target_requests_per_replica: Optional[int] = None
+    eng_ray_coordinator_max_ongoing_requests_per_replica: int = 8
+    eng_ray_coordinator_actor_num_cpus: float = 0.25
+    eng_ray_coordinator_actor_memory_request: Optional[str] = None
 
     # Fault Tolerance & Retry
     eng_ray_max_task_retries: int = 3
@@ -235,7 +270,15 @@ class DoclingServeSettings(BaseSettings):
     eng_ray_enable_heartbeat: bool = True
 
     # Resource Management & Memory Monitoring
-    eng_ray_memory_limit_per_actor: Optional[str] = None
+    eng_ray_converter_actor_memory_request: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "eng_ray_converter_actor_memory_request",
+            "eng_ray_memory_limit_per_actor",
+        ),
+    )
+    eng_ray_dispatcher_num_cpus: float = 0.25
+    eng_ray_dispatcher_memory_request: Optional[str] = None
     eng_ray_object_store_memory: Optional[str] = None
     eng_ray_enable_oom_protection: bool = True
     eng_ray_memory_warning_threshold: float = 0.9
@@ -399,6 +442,20 @@ class DoclingServeSettings(BaseSettings):
         if isinstance(v, str):
             return v.upper()
         return v
+
+    @model_validator(mode="before")
+    @classmethod
+    def warn_deprecated_ray_settings(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            deprecated_keys = {
+                "eng_ray_num_cpus_per_actor": "eng_ray_converter_actor_num_cpus",
+                "eng_ray_memory_limit_per_actor": "eng_ray_converter_actor_memory_request",
+            }
+            for old_key, new_key in deprecated_keys.items():
+                if old_key in data:
+                    _log.warning("%s is deprecated; use %s instead.", old_key, new_key)
+
+        return data
 
     @model_validator(mode="after")
     def engine_settings(self) -> Self:

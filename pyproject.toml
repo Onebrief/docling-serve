@@ -1,6 +1,6 @@
 [project]
 name = "docling-serve"
-version = "1.16.1"  # DO NOT EDIT, updated automatically
+version = "1.20.0"  # DO NOT EDIT, updated automatically
 description = "Running Docling as a service"
 license = {text = "MIT"}
 authors = [
@@ -34,9 +34,9 @@ classifiers = [
 requires-python = ">=3.10"
 dependencies = [
     "docling>=2.88.0,<3.0.0",
-    "docling-core>=2.65.1",
-    "docling-jobkit[kfp,rq]>=1.17.1,<2.0.0",
-    "fastapi[standard]<0.130.0",  # ~=0.115
+    "docling-core>=2.45.0",
+    "docling-jobkit>=1.20.0,<2.0.0",
+    "fastapi[standard]<0.137.0",
     "httpx~=0.28",
     "pydantic~=2.10",
     "pydantic-settings~=2.4",
@@ -78,7 +78,7 @@ dev = [
     "mypy~=1.11",
     "pre-commit-uv~=4.1",
     "pypdf>=6.0.0",
-    "pytest~=8.3",
+    "pytest>=8.3,<10.0.0",
     "pytest-asyncio~=0.24",
     "pytest-check~=2.4",
     "python-semantic-release~=7.32",
@@ -147,7 +147,9 @@ conflicts = [
 environments = ["sys_platform != 'darwin' or platform_machine != 'x86_64'"]
 override-dependencies = [
   "urllib3~=2.0",
-  "xgrammar>=0.1.24"
+  "xgrammar>=0.1.24",
+  "grpcio>=1.75.1",
+  "cryptography>=46.0.7",
 ]
 
 [tool.uv.sources]
@@ -174,8 +176,6 @@ torchvision = [
 pytorch-triton-rocm = [
   { index = "pytorch-rocm", marker = "sys_platform == 'linux'" },
 ]
-
-# docling-jobkit = { git = "https://github.com/docling-project/docling-jobkit/", rev = "cau/ray-dispatcher-improvements" }
 
 # docling = { git = "https://github.com/docling-project/docling/", rev = "main" }
 # docling-jobkit = { path = "../docling-jobkit", editable = true }
