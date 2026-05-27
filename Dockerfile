@@ -11,19 +11,22 @@
 # ffmpeg CVEs) at the cost of video IO and cv2.HTTPS, neither of which docling
 # uses — cv2 is only exercised for image decode/encode/resize on raw bytes.
 #
-# We build on the official python:3.13-slim-trixie image because the Chainguard
-# python-fips runtime doesn't have a C++ toolchain and its `apk` fails on the
-# FIPS container's TLS stack. Debian trixie's glibc (2.41) matches Wolfi's
-# current glibc, so binaries built here load cleanly in the release stage.
-# Both bookworm tags (slim and non-slim) are currently quarantined in Nexus IQ.
-FROM nexus.int.onebrief.tools/docker.io/library/python:3.13-slim-trixie AS opencv-builder
+# We build on the Chainguard python-fips `-dev` image so the builder and runtime
+# share the same Wolfi distro — cv2 links against the same libpng/libjpeg/libtiff
+# sonames the runtime image ships, and we avoid mirroring Debian's image-codec
+# libs under a fabricated multiarch path. The `-dev` image ships gcc/g++/make/
+# pkg-config; we add cmake and the codec dev headers via apk. (apk fetches over
+# HTTPS to virtualapk.cgr.dev — works in CI runners; a corporate MITM proxy
+# like Zscaler will break the TLS handshake locally.)
+FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:3.13.13-r3-dev AS opencv-builder
+USER 0
 # Install the packages the cv2 compile link-checks against. Keep this line
 # stable — adding packages here invalidates the `pip wheel` layer below and
-# triggers a ~20-min OpenCV recompile.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential pkg-config \
-        libpng-dev libjpeg-dev libtiff-dev zlib1g-dev libwebp-dev \
-    && rm -rf /var/lib/apt/lists/*
+# triggers a ~20-min OpenCV recompile. `tiff-dev` (no `lib` prefix) is the
+# Wolfi name; everything else keeps the conventional `lib*-dev` naming.
+RUN apk update && apk add --no-cache \
+        cmake \
+        libpng-dev libjpeg-turbo-dev tiff-dev zlib-dev libwebp-dev
 # Pin to the newest opencv-python-headless that publishes an sdist. The project
 # ships later releases as prebuilt wheels only (no sdist), so `pip wheel
 # --no-binary` can't resolve them. Bump when a newer sdist is available.
@@ -42,13 +45,6 @@ RUN pip install --no-cache-dir --upgrade pip wheel setuptools
 RUN pip wheel --no-binary opencv-python-headless \
         "opencv-python-headless==${OPENCV_HEADLESS_VERSION}" \
         -w /out
-# Runtime-only libs that cv2 needs at load time but were pulled in as transitive
-# deps (not declared in our own apt-get list). Installing them here — AFTER the
-# expensive pip wheel step — means adding more sibling libs only invalidates
-# this cheap apt layer, not the recompile.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        liblerc4 \
-    && rm -rf /var/lib/apt/lists/*
 
 FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:3.13.13-r3-dev AS build
 ENV UV_COMPILE_BYTECODE=0 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=0
@@ -94,26 +90,23 @@ FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:3.13.13-r3 AS rel
 WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PATH="/app/.venv/bin:${PATH}" \
-    LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu
+    PATH="/app/.venv/bin:${PATH}"
 
 # Copy the image-codec runtime libraries cv2.abi3.so was linked against in the
-# opencv-builder stage (Debian bookworm). Chainguard Wolfi ships different
-# sonames (e.g. libjpeg.so.8 instead of libjpeg.so.62), so importing cv2 fails
-# at load time without these. We place them under the Debian multiarch triplet
-# path — which Chainguard doesn't populate — so they don't shadow any system
-# libs. LD_LIBRARY_PATH above tells ld.so to search there.
-COPY --from=opencv-builder /usr/lib/x86_64-linux-gnu/libjpeg.so.62* /usr/lib/x86_64-linux-gnu/
-COPY --from=opencv-builder /usr/lib/x86_64-linux-gnu/libpng16.so.16* /usr/lib/x86_64-linux-gnu/
-COPY --from=opencv-builder /usr/lib/x86_64-linux-gnu/libtiff.so.6* /usr/lib/x86_64-linux-gnu/
-COPY --from=opencv-builder /usr/lib/x86_64-linux-gnu/libwebp.so.7* /usr/lib/x86_64-linux-gnu/
-COPY --from=opencv-builder /usr/lib/x86_64-linux-gnu/libwebpdemux.so.2* /usr/lib/x86_64-linux-gnu/
-COPY --from=opencv-builder /usr/lib/x86_64-linux-gnu/libwebpmux.so.3* /usr/lib/x86_64-linux-gnu/
-COPY --from=opencv-builder /usr/lib/x86_64-linux-gnu/libjbig.so.0* /usr/lib/x86_64-linux-gnu/
-COPY --from=opencv-builder /usr/lib/x86_64-linux-gnu/liblzma.so.5* /usr/lib/x86_64-linux-gnu/
-COPY --from=opencv-builder /usr/lib/x86_64-linux-gnu/libzstd.so.1* /usr/lib/x86_64-linux-gnu/
-COPY --from=opencv-builder /usr/lib/x86_64-linux-gnu/libdeflate.so.0* /usr/lib/x86_64-linux-gnu/
-COPY --from=opencv-builder /usr/lib/x86_64-linux-gnu/libLerc.so.4* /usr/lib/x86_64-linux-gnu/
+# opencv-builder stage. Both stages are Wolfi (Chainguard) so sonames match
+# natively — `/usr/lib` is already in ld.so's default search path, no
+# LD_LIBRARY_PATH workaround needed. libjbig/libdeflate/libLerc are dropped:
+# Wolfi's tiff 4.7.1 doesn't depend on them, so cv2 doesn't expect them
+# at load time. libsharpyuv is added — webp pulls it in transitively.
+COPY --from=opencv-builder /usr/lib/libjpeg.so.8* /usr/lib/
+COPY --from=opencv-builder /usr/lib/libpng16.so.16* /usr/lib/
+COPY --from=opencv-builder /usr/lib/libtiff.so.6* /usr/lib/
+COPY --from=opencv-builder /usr/lib/libwebp.so.7* /usr/lib/
+COPY --from=opencv-builder /usr/lib/libwebpdemux.so.2* /usr/lib/
+COPY --from=opencv-builder /usr/lib/libwebpmux.so.3* /usr/lib/
+COPY --from=opencv-builder /usr/lib/libsharpyuv.so.0* /usr/lib/
+COPY --from=opencv-builder /usr/lib/liblzma.so.5* /usr/lib/
+COPY --from=opencv-builder /usr/lib/libzstd.so.1* /usr/lib/
 
 # Copy venv + docling source + model weights from build stage. OCR uses rapidocr
 # (ONNX-based) — picked over tesserocr because tesserocr pulls in cysignals and
