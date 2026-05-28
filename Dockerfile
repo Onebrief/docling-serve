@@ -22,11 +22,13 @@ FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:3.13.13-r3-dev AS
 USER 0
 # Install the packages the cv2 compile link-checks against. Keep this line
 # stable — adding packages here invalidates the `pip wheel` layer below and
-# triggers a ~20-min OpenCV recompile. `tiff-dev` (no `lib` prefix) is the
-# Wolfi name; everything else keeps the conventional `lib*-dev` naming.
+# triggers a ~20-min OpenCV recompile. TIFF dev libs are intentionally omitted
+# because Wolfi's libtiff is built with --enable-jpeg12 which expects symbols
+# (jpeg12_write_raw_data) from a 12-bit-capable libjpeg that Wolfi doesn't
+# ship in the standard libjpeg.so.8 — we sidestep by disabling TIFF in cv2.
 RUN apk update && apk add --no-cache \
         cmake \
-        libpng-dev libjpeg-turbo-dev tiff-dev zlib-dev libwebp-dev
+        libpng-dev libjpeg-turbo-dev zlib-dev libwebp-dev
 # Pin to the newest opencv-python-headless that publishes an sdist. The project
 # ships later releases as prebuilt wheels only (no sdist), so `pip wheel
 # --no-binary` can't resolve them. Bump when a newer sdist is available.
@@ -39,6 +41,7 @@ ENV ENABLE_HEADLESS=1 \
     CMAKE_ARGS="-DWITH_FFMPEG=OFF -DWITH_OPENSSL=OFF -DWITH_GSTREAMER=OFF \
                 -DWITH_GTK=OFF -DWITH_QT=OFF -DWITH_V4L=OFF -DWITH_1394=OFF \
                 -DWITH_ANDROID_MEDIANDK=OFF \
+                -DWITH_TIFF=OFF -DWITH_JPEG2000=OFF -DWITH_OPENEXR=OFF \
                 -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF \
                 -DBUILD_EXAMPLES=OFF -DBUILD_opencv_apps=OFF"
 RUN pip install --no-cache-dir --upgrade pip wheel setuptools
@@ -105,18 +108,15 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # Copy the image-codec runtime libraries cv2.abi3.so was linked against in the
 # opencv-builder stage. Both stages are Wolfi (Chainguard) so sonames match
 # natively — `/usr/lib` is already in ld.so's default search path, no
-# LD_LIBRARY_PATH workaround needed. libjbig/libdeflate/libLerc are dropped:
-# Wolfi's tiff 4.7.1 doesn't depend on them, so cv2 doesn't expect them
-# at load time. libsharpyuv is added — webp pulls it in transitively.
+# LD_LIBRARY_PATH workaround needed. TIFF/JPEG2000/OpenEXR support is compiled
+# out of cv2 (see CMAKE_ARGS above), so libtiff/liblzma/libzstd are not copied.
+# libsharpyuv is included — webp pulls it in transitively.
 COPY --from=opencv-builder /usr/lib/libjpeg.so.8* /usr/lib/
 COPY --from=opencv-builder /usr/lib/libpng16.so.16* /usr/lib/
-COPY --from=opencv-builder /usr/lib/libtiff.so.6* /usr/lib/
 COPY --from=opencv-builder /usr/lib/libwebp.so.7* /usr/lib/
 COPY --from=opencv-builder /usr/lib/libwebpdemux.so.2* /usr/lib/
 COPY --from=opencv-builder /usr/lib/libwebpmux.so.3* /usr/lib/
 COPY --from=opencv-builder /usr/lib/libsharpyuv.so.0* /usr/lib/
-COPY --from=opencv-builder /usr/lib/liblzma.so.5* /usr/lib/
-COPY --from=opencv-builder /usr/lib/libzstd.so.1* /usr/lib/
 
 # Copy venv + docling source + model weights from build stage. OCR uses rapidocr
 # (ONNX-based) — picked over tesserocr because tesserocr pulls in cysignals and
