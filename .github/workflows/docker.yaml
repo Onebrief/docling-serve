@@ -12,7 +12,7 @@ permissions: {}
 
 jobs:
   build:
-    name: Build amd64
+    name: Build
     permissions:
       actions: read
       contents: read

@@ -1,3 +1,85 @@
+## [v1.20.0](https://github.com/docling-project/docling-serve/releases/tag/v1.20.0) - 2026-05-21
+
+### Feature
+
+* Expose docs metadata in callbacks ([#612](https://github.com/docling-project/docling-serve/issues/612)) ([`ca1cc9f`](https://github.com/docling-project/docling-serve/commit/ca1cc9f525ae405c260e02d26a8ff63128f81e66))
+
+### Documentation
+
+* Fix docker pull README.md example ([#603](https://github.com/docling-project/docling-serve/issues/603)) ([`75a35ec`](https://github.com/docling-project/docling-serve/commit/75a35ecd49e16a11ac59801bd3cccd73d2106fe3))
+
+### Docling libraries included in this release:
+- docling 2.95.0
+- docling-core 2.77.0
+- docling-ibm-models 3.13.2
+- docling-jobkit 1.20.0
+- docling-mcp 2.0.1
+- docling-parse 5.11.0
+- docling-serve 1.20.0
+- docling-slim 2.95.0
+
+## [v1.19.0](https://github.com/docling-project/docling-serve/releases/tag/v1.19.0) - 2026-05-20
+
+### Feature
+
+* Control error detail of public API responses ([#609](https://github.com/docling-project/docling-serve/issues/609)) ([`55dab06`](https://github.com/docling-project/docling-serve/commit/55dab0694f0d83be1cd60295f8fbd415639cb904))
+* Support for server side page slicing and concurrency for long PDFs ([#585](https://github.com/docling-project/docling-serve/issues/585)) ([`df28b48`](https://github.com/docling-project/docling-serve/commit/df28b484dd157e788074f3fc465a3e47cfc551ba))
+
+### Documentation
+
+* **security:** Add GitHub Private Vulnerability Reporting ([#601](https://github.com/docling-project/docling-serve/issues/601)) ([`3bddacc`](https://github.com/docling-project/docling-serve/commit/3bddacc81422c5bcccb9d5a4ded7e9ac7d558bce))
+
+### Docling libraries included in this release:
+- docling 2.94.0
+- docling-core 2.77.0
+- docling-ibm-models 3.13.2
+- docling-jobkit 1.19.1
+- docling-mcp 2.0.1
+- docling-parse 5.11.0
+- docling-serve 1.19.0
+- docling-slim 2.94.0
+
+## [v1.18.0](https://github.com/docling-project/docling-serve/releases/tag/v1.18.0) - 2026-05-07
+
+### Feature
+
+* Update docling dependencies ([#599](https://github.com/docling-project/docling-serve/issues/599)) ([`c1a3e31`](https://github.com/docling-project/docling-serve/commit/c1a3e3159d1f8225883368ae4ad2f33fa6f99b90))
+
+### Fix
+
+* Fail server launch if the config file is bogus ([#598](https://github.com/docling-project/docling-serve/issues/598)) ([`c5a4332`](https://github.com/docling-project/docling-serve/commit/c5a43320e6d24afea4acdccb23aeb2ffb3196710))
+
+### Docling libraries included in this release:
+- docling 2.93.0
+- docling-core 2.74.1
+- docling-ibm-models 3.13.2
+- docling-jobkit 1.18.1
+- docling-mcp 1.3.4
+- docling-parse 5.10.1
+- docling-serve 1.18.0
+- docling-slim 2.93.0
+
+## [v1.17.0](https://github.com/docling-project/docling-serve/releases/tag/v1.17.0) - 2026-04-24
+
+### Feature
+
+* Docling v2.91.0 upgrade and other deps ([#589](https://github.com/docling-project/docling-serve/issues/589)) ([`babb6ea`](https://github.com/docling-project/docling-serve/commit/babb6ea404209906be128d0f748566d04cb4608f))
+* **ray:** Add control for graceful shutdown timeout of actors and improved dispatcher ([#584](https://github.com/docling-project/docling-serve/issues/584)) ([`2a1e8c2`](https://github.com/docling-project/docling-serve/commit/2a1e8c2a5a0a65b9efc4f47df535a01a4f2a9a5b))
+* Move client SDK to docling ([#575](https://github.com/docling-project/docling-serve/issues/575)) ([`683eeca`](https://github.com/docling-project/docling-serve/commit/683eecae3e2d503e05d3c106fd169164db1cbe5d))
+
+### Fix
+
+* Ray dispatcher improvements ([#579](https://github.com/docling-project/docling-serve/issues/579)) ([`7991c05`](https://github.com/docling-project/docling-serve/commit/7991c05698c1ee5de2edd6f8a3906366c16e2160))
+
+### Docling libraries included in this release:
+- docling 2.91.0
+- docling-core 2.74.1
+- docling-ibm-models 3.13.2
+- docling-jobkit 1.18.0
+- docling-mcp 1.3.4
+- docling-parse 5.10.0
+- docling-serve 1.17.0
+
 ## [v1.16.1](https://github.com/docling-project/docling-serve/releases/tag/v1.16.1) - 2026-04-09
 
 ### Fix

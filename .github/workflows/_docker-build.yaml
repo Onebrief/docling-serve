@@ -20,44 +20,47 @@ on:
         required: false
         type: boolean
         default: true
+      platforms:
+        description: 'Platform matrix as JSON. Default builds both amd64 and arm64.'
+        required: false
+        type: string
+        default: '[{"arch":"amd64"},{"arch":"arm64"}]'
     outputs:
       image:
-        value: ${{ jobs.build.outputs.image }}
+        value: ${{ jobs.merge.outputs.image }}
       digest:
-        value: ${{ jobs.build.outputs.digest }}
+        value: ${{ jobs.merge.outputs.digest }}
       version:
-        value: ${{ jobs.build.outputs.version }}
+        value: ${{ jobs.merge.outputs.version }}
       date:
-        value: ${{ jobs.build.outputs.date }}
+        value: ${{ jobs.merge.outputs.date }}
       pinned-version:
-        value: ${{ jobs.build.outputs.pinned-version }}
+        value: ${{ jobs.merge.outputs.pinned-version }}
 
 jobs:
   build:
-    name: Build amd64 (${{ inputs.image-name }})
+    name: Build ${{ matrix.arch }} (${{ inputs.image-name }})
     permissions:
       actions: read
       contents: read
       checks: write
       id-token: write
       security-events: write
-    runs-on: runs-on=${{ github.run_id}}/pool=stepsecurity-x64
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.platforms) }}
+    env:
+      ENDPOINTS: >-
+        {
+          "amd64": "a423fbf740aca40178ed67aebc900b08-507af52079128d7f.elb.us-east-1.amazonaws.com",
+          "arm64": "ae269498b1f714f75afeff5d6806c6ab-5405620bf7022a68.elb.us-east-1.amazonaws.com"
+        }
     outputs:
-      image: ${{ steps.setout.outputs.image }}
-      digest: ${{ steps.setout.outputs.digest }}
-      version: ${{ steps.setout.outputs.version }}
-      date: ${{ steps.setout.outputs.date }}
-      pinned-version: ${{ steps.setout.outputs.version }}@${{ steps.setout.outputs.digest }}
+      digestsid: ${{ steps.setout.outputs.digestsid }}
+    runs-on: runs-on=${{ github.run_id }}-build-${{ matrix.arch }}/pool=stepsecurity-x64
     steps:
       - uses: runs-on/action@cd2b598b0515d39d78c38a02d529db87d2196d1e #v2
-
-      - uses: runs-on/snapshot@6a48ee4defc461496b2a630db7d769fbe1f12c7a #v1
-        with:
-          path: /var/lib/docker
-          volume_size: 128
-
-      - name: clear old images
-        run: docker image prune -f
 
       - name: Harden Runner
         uses: step-security/harden-runner@95d9a5deda9de15063e7595e9719c11c38c90ae2 # v2.13.2
@@ -66,13 +69,6 @@ jobs:
 
       - name: Check out repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 #v4.2.2
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@00943011d9042930efac3dcd3a170e4273319bc8 #v5.1.0
-        with:
-          role-to-assume: arn:aws:iam::183613197217:role/reusable-docker-build
-          aws-region: us-west-2
-          role-skip-session-tagging: true
 
       - name: Login to nexus container registry
         uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 #v3.4.0
@@ -84,8 +80,8 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 #v3.11.1
         with:
-          name: runs-on
-          keep-state: true
+          driver: remote
+          endpoint: tcp://${{ fromJson(env.ENDPOINTS)[matrix.arch] }}:1234
 
       - name: Docker Metadata
         id: meta
@@ -94,16 +90,17 @@ jobs:
           images: |
             nexus.int.onebrief.tools/${{ inputs.image-name }}
 
-      - name: Build and push docker image
+      - name: Build and push docker image by digest
         id: build
         uses: docker/build-push-action@14487ce63c7a62a4a324b0bfb37086795e31c6c1 #v6.16.0
         with:
           push: true
-          platforms: linux/amd64
+          platforms: linux/${{ matrix.arch }}
           file: ${{ inputs.dockerfile }}
           context: ${{ inputs.context }}
-          tags: ${{ steps.meta.outputs.tags }}
           provenance: ${{ inputs.provenance }}
+          outputs: |
+            type=image,name=nexus.int.onebrief.tools/${{ inputs.image-name }},push-by-digest=true,name-canonical=true,push=true
           build-args: |
             GIT_COMMIT=${{ github.sha }}
             VERSION=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.version'] }}
@@ -116,15 +113,111 @@ jobs:
 
       - name: Set outputs
         id: setout
+        env:
+          IMAGE_NAME: ${{ inputs.image-name }}
+        shell: bash
+        run: |
+          set -o pipefail
+          echo "digestsid=$(echo "$IMAGE_NAME" | md5sum | awk '{ print $1 }')" >> $GITHUB_OUTPUT
+
+      - name: Export digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        shell: bash
+        run: |
+          mkdir -p /tmp/digests
+          echo "Exporting digest: $DIGEST"
+          touch "/tmp/digests/${DIGEST#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 #v4.6.2
+        with:
+          name: digests-${{ steps.setout.outputs.digestsid }}-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: Merge (${{ inputs.image-name }})
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    runs-on: runs-on=${{ github.run_id }}-merge/pool=stepsecurity-x64
+    needs:
+      - build
+    outputs:
+      image: ${{ steps.setout.outputs.image }}
+      digest: ${{ steps.setout.outputs.digest }}
+      version: ${{ steps.setout.outputs.version }}
+      date: ${{ steps.setout.outputs.date }}
+      pinned-version: ${{ steps.setout.outputs.version }}@${{ steps.setout.outputs.digest }}
+    steps:
+      - uses: runs-on/action@cd2b598b0515d39d78c38a02d529db87d2196d1e #v2
+
+      - name: Harden Runner
+        uses: step-security/harden-runner@95d9a5deda9de15063e7595e9719c11c38c90ae2 # v2.13.2
+        with:
+          egress-policy: audit
+
+      - name: Download digests
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 #v4.3.0
+        with:
+          path: /tmp/digests
+          pattern: digests-${{ needs.build.outputs.digestsid }}-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 #v3.11.1
+
+      - name: Login to nexus container registry
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 #v3.4.0
+        with:
+          registry: nexus.int.onebrief.tools
+          username: ${{ vars.NEXUS_USER }}
+          password: ${{ secrets.NEXUS_PASS }}
+
+      - name: Docker Metadata
+        id: meta
+        uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 #v5.7.0
+        with:
+          images: |
+            nexus.int.onebrief.tools/${{ inputs.image-name }}
+
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
         shell: bash
         env:
-          META_JSON: ${{ steps.meta.outputs.json }}
-          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_NAME: ${{ inputs.image-name }}
+          PLATFORMS: ${{ inputs.platforms }}
         run: |
+          DIGESTS_COUNT=$(find /tmp/digests -type f | wc -l)
+          DIGESTS_EXPECTED=$(jq -n 'env.PLATFORMS | fromjson | length')
+          if [[ $DIGESTS_COUNT -ne $DIGESTS_EXPECTED ]]; then
+            echo "::error::Unexpected number of digests found ($DIGESTS_COUNT != $DIGESTS_EXPECTED)"
+            find /tmp/digests -type f
+            exit 1
+          fi
+
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map(select(startswith("nexus.int.onebrief.tools/"))) | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf "nexus.int.onebrief.tools/${IMAGE_NAME}@sha256:%s " *)
+
+      - name: Inspect image and set outputs
+        id: setout
+        shell: bash
+        env:
+          IMAGE_NAME: ${{ inputs.image-name }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          META_JSON: ${{ steps.meta.outputs.json }}
+        run: |
+          docker buildx imagetools inspect "nexus.int.onebrief.tools/${IMAGE_NAME}:${VERSION}"
+          NEXUS_DIGEST=$(docker buildx imagetools inspect "nexus.int.onebrief.tools/${IMAGE_NAME}:${VERSION}" --format "{{json .Manifest}}" | jq -r .digest)
+
           echo "image=$(echo "$META_JSON" | jq -r '.tags[0]')" >> $GITHUB_OUTPUT
           echo "version=$(echo "$META_JSON" | jq -r '.labels["org.opencontainers.image.version"]')" >> $GITHUB_OUTPUT
           echo "date=$(echo "$META_JSON" | jq -r '.labels["org.opencontainers.image.created"]')" >> $GITHUB_OUTPUT
-          echo "digest=${DIGEST}" >> $GITHUB_OUTPUT
+          echo "digest=${NEXUS_DIGEST}" >> $GITHUB_OUTPUT
 
       - name: Configure AWS credentials for cosign
         uses: aws-actions/configure-aws-credentials@00943011d9042930efac3dcd3a170e4273319bc8 #v5.1.0
@@ -141,7 +234,7 @@ jobs:
       - name: Sign Nexus image
         env:
           REPOSITORY: ${{ inputs.image-name }}
-          NEXUS_DIGEST: ${{ steps.build.outputs.digest }}
+          NEXUS_DIGEST: ${{ steps.setout.outputs.digest }}
         shell: bash
         run: |
           cosign version

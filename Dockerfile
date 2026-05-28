@@ -11,19 +11,24 @@
 # ffmpeg CVEs) at the cost of video IO and cv2.HTTPS, neither of which docling
 # uses — cv2 is only exercised for image decode/encode/resize on raw bytes.
 #
-# We build on the official python:3.13-bookworm-slim image because the
-# Chainguard python-fips runtime doesn't have a C++ toolchain and its `apk`
-# fails on the FIPS container's TLS stack. Debian bookworm's glibc (2.36) is
-# backward-compatible with Wolfi's newer glibc, so binaries built here load
-# cleanly in the release stage.
-FROM nexus.int.onebrief.tools/docker.io/library/python:3.13-slim-bookworm AS opencv-builder
+# We build on the Chainguard python-fips `-dev` image so the builder and runtime
+# share the same Wolfi distro — cv2 links against the same libpng/libjpeg/libtiff
+# sonames the runtime image ships, and we avoid mirroring Debian's image-codec
+# libs under a fabricated multiarch path. The `-dev` image ships gcc/g++/make/
+# pkg-config; we add cmake and the codec dev headers via apk. (apk fetches over
+# HTTPS to virtualapk.cgr.dev — works in CI runners; a corporate MITM proxy
+# like Zscaler will break the TLS handshake locally.)
+FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:3.13.13-r3-dev AS opencv-builder
+USER 0
 # Install the packages the cv2 compile link-checks against. Keep this line
 # stable — adding packages here invalidates the `pip wheel` layer below and
-# triggers a ~20-min OpenCV recompile.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential pkg-config \
-        libpng-dev libjpeg-dev libtiff-dev zlib1g-dev libwebp-dev \
-    && rm -rf /var/lib/apt/lists/*
+# triggers a ~20-min OpenCV recompile. TIFF dev libs are intentionally omitted
+# because Wolfi's libtiff is built with --enable-jpeg12 which expects symbols
+# (jpeg12_write_raw_data) from a 12-bit-capable libjpeg that Wolfi doesn't
+# ship in the standard libjpeg.so.8 — we sidestep by disabling TIFF in cv2.
+RUN apk update && apk add --no-cache \
+        cmake \
+        libpng-dev libjpeg-turbo-dev zlib-dev libwebp-dev
 # Pin to the newest opencv-python-headless that publishes an sdist. The project
 # ships later releases as prebuilt wheels only (no sdist), so `pip wheel
 # --no-binary` can't resolve them. Bump when a newer sdist is available.
@@ -36,21 +41,16 @@ ENV ENABLE_HEADLESS=1 \
     CMAKE_ARGS="-DWITH_FFMPEG=OFF -DWITH_OPENSSL=OFF -DWITH_GSTREAMER=OFF \
                 -DWITH_GTK=OFF -DWITH_QT=OFF -DWITH_V4L=OFF -DWITH_1394=OFF \
                 -DWITH_ANDROID_MEDIANDK=OFF \
+                -DWITH_TIFF=OFF -DWITH_JPEG2000=OFF -DWITH_OPENEXR=OFF \
                 -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF \
                 -DBUILD_EXAMPLES=OFF -DBUILD_opencv_apps=OFF"
 RUN pip install --no-cache-dir --upgrade pip wheel setuptools
 RUN pip wheel --no-binary opencv-python-headless \
         "opencv-python-headless==${OPENCV_HEADLESS_VERSION}" \
         -w /out
-# Runtime-only libs that cv2 needs at load time but were pulled in as transitive
-# deps (not declared in our own apt-get list). Installing them here — AFTER the
-# expensive pip wheel step — means adding more sibling libs only invalidates
-# this cheap apt layer, not the recompile.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        liblerc4 \
-    && rm -rf /var/lib/apt/lists/*
 
-FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:3.13.13-dev AS build
+FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:3.13.13-r3-dev AS build
+ARG TARGETARCH
 ENV UV_COMPILE_BYTECODE=0 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=0
 
 WORKDIR /app
@@ -67,11 +67,20 @@ RUN /usr/bin/python -m uv venv /app/.venv
 # We swap the PyPI opencv-python-headless wheel for our FIPS-clean rebuild (see opencv-builder
 # stage above), and pin cryptography + pillow to CVE-patched versions. rapidocr stays in as our
 # OCR engine: ONNX-based, no cysignals, FIPS-safe.
+#
+# Arch split: amd64 uses CUDA (cu128 torch group + onnxruntime-gpu); arm64 is
+# CPU-only because onnxruntime-gpu publishes no aarch64 wheels and the realistic
+# arm64 deploy targets (Graviton/Ampere) have no NVIDIA GPUs anyway.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    /usr/bin/python -m uv sync --frozen --python /app/.venv/bin/python --group cu128 --no-group dev --no-group pypi --no-install-project \
+    if [ "$TARGETARCH" = "arm64" ]; then \
+        TORCH_GROUP=cpu; ORT_PKG=onnxruntime; \
+    else \
+        TORCH_GROUP=cu128; ORT_PKG=onnxruntime-gpu; \
+    fi \
+    && /usr/bin/python -m uv sync --frozen --python /app/.venv/bin/python --group "$TORCH_GROUP" --no-group dev --no-group pypi --no-install-project \
     && /usr/bin/python -m uv pip uninstall --python /app/.venv/bin/python opencv-python opencv-python-headless \
     && /usr/bin/python -m uv pip install --python /app/.venv/bin/python /tmp/opencv_python_headless-*.whl \
-    && /usr/bin/python -m uv pip install --python /app/.venv/bin/python "onnxruntime-gpu>=1.19.0" \
+    && /usr/bin/python -m uv pip install --python /app/.venv/bin/python "${ORT_PKG}>=1.19.0" \
     && /usr/bin/python -m uv pip install --python /app/.venv/bin/python "cryptography>=46.0.5" "pillow>=12.1.1"
 
 # Copy project source and install the docling_serve package itself (cheap vs. the deps layer above)
@@ -89,31 +98,25 @@ RUN HF_HUB_DOWNLOAD_TIMEOUT="90" \
 
 # Multistage release build
 
-FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:3.13.13 AS release
+FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:3.13.13-r3 AS release
 
 WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PATH="/app/.venv/bin:${PATH}" \
-    LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu
+    PATH="/app/.venv/bin:${PATH}"
 
 # Copy the image-codec runtime libraries cv2.abi3.so was linked against in the
-# opencv-builder stage (Debian bookworm). Chainguard Wolfi ships different
-# sonames (e.g. libjpeg.so.8 instead of libjpeg.so.62), so importing cv2 fails
-# at load time without these. We place them under the Debian multiarch triplet
-# path — which Chainguard doesn't populate — so they don't shadow any system
-# libs. LD_LIBRARY_PATH above tells ld.so to search there.
-COPY --from=opencv-builder /usr/lib/x86_64-linux-gnu/libjpeg.so.62* /usr/lib/x86_64-linux-gnu/
-COPY --from=opencv-builder /usr/lib/x86_64-linux-gnu/libpng16.so.16* /usr/lib/x86_64-linux-gnu/
-COPY --from=opencv-builder /usr/lib/x86_64-linux-gnu/libtiff.so.6* /usr/lib/x86_64-linux-gnu/
-COPY --from=opencv-builder /usr/lib/x86_64-linux-gnu/libwebp.so.7* /usr/lib/x86_64-linux-gnu/
-COPY --from=opencv-builder /usr/lib/x86_64-linux-gnu/libwebpdemux.so.2* /usr/lib/x86_64-linux-gnu/
-COPY --from=opencv-builder /usr/lib/x86_64-linux-gnu/libwebpmux.so.3* /usr/lib/x86_64-linux-gnu/
-COPY --from=opencv-builder /usr/lib/x86_64-linux-gnu/libjbig.so.0* /usr/lib/x86_64-linux-gnu/
-COPY --from=opencv-builder /usr/lib/x86_64-linux-gnu/liblzma.so.5* /usr/lib/x86_64-linux-gnu/
-COPY --from=opencv-builder /usr/lib/x86_64-linux-gnu/libzstd.so.1* /usr/lib/x86_64-linux-gnu/
-COPY --from=opencv-builder /usr/lib/x86_64-linux-gnu/libdeflate.so.0* /usr/lib/x86_64-linux-gnu/
-COPY --from=opencv-builder /usr/lib/x86_64-linux-gnu/libLerc.so.4* /usr/lib/x86_64-linux-gnu/
+# opencv-builder stage. Both stages are Wolfi (Chainguard) so sonames match
+# natively — `/usr/lib` is already in ld.so's default search path, no
+# LD_LIBRARY_PATH workaround needed. TIFF/JPEG2000/OpenEXR support is compiled
+# out of cv2 (see CMAKE_ARGS above), so libtiff/liblzma/libzstd are not copied.
+# libsharpyuv is included — webp pulls it in transitively.
+COPY --from=opencv-builder /usr/lib/libjpeg.so.8* /usr/lib/
+COPY --from=opencv-builder /usr/lib/libpng16.so.16* /usr/lib/
+COPY --from=opencv-builder /usr/lib/libwebp.so.7* /usr/lib/
+COPY --from=opencv-builder /usr/lib/libwebpdemux.so.2* /usr/lib/
+COPY --from=opencv-builder /usr/lib/libwebpmux.so.3* /usr/lib/
+COPY --from=opencv-builder /usr/lib/libsharpyuv.so.0* /usr/lib/
 
 # Copy venv + docling source + model weights from build stage. OCR uses rapidocr
 # (ONNX-based) — picked over tesserocr because tesserocr pulls in cysignals and
