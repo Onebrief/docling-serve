@@ -128,4 +128,10 @@ ENV \
 
 USER nonroot
 
+# Smoke test: fail the build if the app can't be imported/assembled in the final
+# runtime image. Catches import-time crashes (missing/renamed distributions like
+# docling vs docling-slim, bad merge resolutions, missing runtime .so libs) before
+# the image is ever pushed or deployed. Runs as nonroot to mirror runtime.
+RUN python -c "import docling_serve.app; from docling_serve.app import create_app; create_app()"
+
 ENTRYPOINT ["docling-serve", "run"]
