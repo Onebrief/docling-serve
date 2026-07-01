@@ -18,7 +18,7 @@
 # pkg-config; we add cmake and the codec dev headers via apk. (apk fetches over
 # HTTPS to virtualapk.cgr.dev — works in CI runners; a corporate MITM proxy
 # like Zscaler will break the TLS handshake locally.)
-FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:3.13.13-r3-dev AS opencv-builder
+FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:3.13.14-dev AS opencv-builder
 USER 0
 # Install the packages the cv2 compile link-checks against. Keep this line
 # stable — adding packages here invalidates the `pip wheel` layer below and
@@ -49,7 +49,7 @@ RUN pip wheel --no-binary opencv-python-headless \
         "opencv-python-headless==${OPENCV_HEADLESS_VERSION}" \
         -w /out
 
-FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:3.13.13-r3-dev AS build
+FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:3.13.14-dev AS build
 ARG TARGETARCH
 ENV UV_COMPILE_BYTECODE=0 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=0
 
@@ -98,7 +98,7 @@ RUN HF_HUB_DOWNLOAD_TIMEOUT="90" \
 
 # Multistage release build
 
-FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:3.13.13-r3 AS release
+FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:3.13.14 AS release
 
 WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 \
