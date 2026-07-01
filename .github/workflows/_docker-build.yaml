@@ -53,8 +53,8 @@ jobs:
     env:
       ENDPOINTS: >-
         {
-          "amd64": "a423fbf740aca40178ed67aebc900b08-507af52079128d7f.elb.us-east-1.amazonaws.com",
-          "arm64": "ae269498b1f714f75afeff5d6806c6ab-5405620bf7022a68.elb.us-east-1.amazonaws.com"
+          "amd64": "acacab27f41b14a139365db6c39e4fa0-f0b3e773ef03bf17.elb.us-east-1.amazonaws.com",
+          "arm64": "a3b4f3eb07b8644e89058b7b4b673bcf-41d24dca9dd63827.elb.us-east-1.amazonaws.com"
         }
     outputs:
       digestsid: ${{ steps.setout.outputs.digestsid }}
@@ -77,11 +77,38 @@ jobs:
           username: ${{ vars.NEXUS_USER }}
           password: ${{ secrets.NEXUS_PASS }}
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 #v3.11.1
+      - name: Check buildkit
+        id: buildkit
+        env:
+          ENDPOINT: tcp://${{ fromJson(env.ENDPOINTS)[matrix.arch] }}:1234
+        run: |
+          docker buildx create --name remote --driver remote "$ENDPOINT" >/dev/null 2>&1 || true
+          if docker buildx inspect --bootstrap remote >/dev/null 2>&1; then
+            echo "up=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "up=false" >> "$GITHUB_OUTPUT"
+            docker buildx rm remote >/dev/null 2>&1 || true
+          fi
+
+      - name: Mount docker layer cache volume
+        if: steps.buildkit.outputs.up != 'true'
+        uses: runs-on/snapshot@d3bcc424e9b751601b1ff830243cd72ad21c44ba # v1.1.1
         with:
-          driver: remote
-          endpoint: tcp://${{ fromJson(env.ENDPOINTS)[matrix.arch] }}:1234
+          path: /var/lib/docker
+          volume_size: 60
+          version: docker
+
+      - name: Set up local buildx
+        if: steps.buildkit.outputs.up != 'true'
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+        with:
+          name: local-runner
+          keep-state: true
+
+      - name: Clear old cache items
+        if: steps.buildkit.outputs.up != 'true'
+        run: |
+          docker buildx prune -af --filter "until=48h" --min-free-space=10gb
 
       - name: Docker Metadata
         id: meta
@@ -94,6 +121,7 @@ jobs:
         id: build
         uses: docker/build-push-action@14487ce63c7a62a4a324b0bfb37086795e31c6c1 #v6.16.0
         with:
+          builder: ${{ steps.buildkit.outputs.up == 'true' && 'remote' || 'local-runner' }}
           push: true
           platforms: linux/${{ matrix.arch }}
           file: ${{ inputs.dockerfile }}
