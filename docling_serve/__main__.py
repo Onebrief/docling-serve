@@ -66,21 +66,25 @@ def callback(
         ),
     ] = 0,
 ) -> None:
+    from docling_serve.logging_config import setup_logging
+
     # Priority: CLI flag > ENV variable > default (WARNING)
     if verbose > 0:
         # CLI flag takes precedence
-        if verbose == 1:
-            logging.basicConfig(level=logging.INFO)
-        elif verbose >= 2:
-            logging.basicConfig(level=logging.DEBUG)
+        log_level = "INFO" if verbose == 1 else "DEBUG"
     elif docling_serve_settings.log_level:
         # Use ENV variable if CLI flag not provided
-        logging.basicConfig(
-            level=getattr(logging, docling_serve_settings.log_level.value)
-        )
+        log_level = docling_serve_settings.log_level.value
     else:
         # Default to WARNING
-        logging.basicConfig(level=logging.WARNING)
+        log_level = "WARNING"
+
+    # Setup logging with configured format
+    setup_logging(
+        log_format=docling_serve_settings.log_format.value,
+        log_level=log_level,
+        header_prefix=docling_serve_settings.log_header_prefix,
+    )
 
 
 def _run(
@@ -144,39 +148,9 @@ def _run(
 
     console.print("")
     console.print("Logs:")
-    
-    LOGGING_CONFIG = {
-        "version": 1,
-        "disable_existing_loggers": False,
-        "formatters": {
-            "default": {
-                "format": "%(levelname)s - %(name)s - %(message)s"
-            },
-            "access": {
-                "format": "%(levelname)s - %(client_addr)s - %(request_line)s - %(status_code)s"
-            },
-        },
-        "handlers": {
-            "default": {
-                "formatter": "default",
-                "class": "logging.StreamHandler",
-                "stream": "ext://sys.stderr",
-            },
-            "access": {
-                "formatter": "access",
-                "class": "logging.StreamHandler",
-                "stream": "ext://sys.stdout",
-            },
-        },
-        "loggers": {
-            "uvicorn": {"handlers": ["default"], "level": "ERROR"},
-            "uvicorn.error": {"level": "ERROR"},
-            "uvicorn.access": {"handlers": ["access"], "level": "ERROR", "propagate": False},
-            "docling_serve.app": {"handlers": ["default"], "level": "INFO"},
-        },
-    }
 
     # Launch the server
+    # Disable uvicorn's default logging config so our custom logging (setup_logging) is used
     uvicorn.run(
         app="docling_serve.app:create_app",
         factory=True,
@@ -190,7 +164,7 @@ def _run(
         ssl_certfile=uvicorn_settings.ssl_certfile,
         ssl_keyfile=uvicorn_settings.ssl_keyfile,
         ssl_keyfile_password=uvicorn_settings.ssl_keyfile_password,
-        log_config=LOGGING_CONFIG,
+        log_config=None,  # Disable uvicorn's logging config to use our custom setup
     )
 
 
@@ -419,16 +393,22 @@ def rq_worker() -> Any:
         RQOrchestratorConfig,
     )
 
+    from docling_serve.logging_config import setup_logging
+    from docling_serve.orchestrator_factory import _build_s3_presigned_config
     from docling_serve.rq_instrumentation import setup_rq_worker_instrumentation
     from docling_serve.rq_worker_instrumented import InstrumentedRQWorker
 
     # Configure logging for RQ worker
-    if docling_serve_settings.log_level:
-        logging.basicConfig(
-            level=getattr(logging, docling_serve_settings.log_level.value)
-        )
-    else:
-        logging.basicConfig(level=logging.WARNING)
+    log_level = (
+        docling_serve_settings.log_level.value
+        if docling_serve_settings.log_level
+        else "WARNING"
+    )
+    setup_logging(
+        log_format=docling_serve_settings.log_format.value,
+        log_level=log_level,
+        header_prefix=docling_serve_settings.log_header_prefix,
+    )
 
     # Set up OpenTelemetry for the worker process
     if docling_serve_settings.otel_enable_traces:
@@ -436,6 +416,7 @@ def rq_worker() -> Any:
 
     rq_config = RQOrchestratorConfig(
         redis_url=docling_serve_settings.eng_rq_redis_url,
+        queue_name=docling_serve_settings.eng_rq_queue_name,
         results_prefix=docling_serve_settings.eng_rq_results_prefix,
         sub_channel=docling_serve_settings.eng_rq_sub_channel,
         scratch_dir=get_scratch(),
@@ -448,6 +429,7 @@ def rq_worker() -> Any:
         redis_gate_reserved_connections=docling_serve_settings.eng_rq_redis_gate_reserved_connections,
         redis_gate_wait_timeout=docling_serve_settings.eng_rq_redis_gate_wait_timeout,
         redis_gate_status_poll_wait_timeout=docling_serve_settings.eng_rq_redis_gate_status_poll_wait_timeout,
+        s3_presigned_config=_build_s3_presigned_config(),
     )
 
     cm_config = DoclingConverterManagerConfig(

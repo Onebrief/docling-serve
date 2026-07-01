@@ -37,6 +37,7 @@ from fastapi.openapi.docs import (
 )
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import create_model
 from scalar_fastapi import get_scalar_api_reference
 
 from docling.datamodel.base_models import DocumentStream, InputFormat
@@ -54,10 +55,10 @@ from docling.datamodel.service.options import (
     ConvertDocumentsOptions as ConvertDocumentsRequestOptions,
 )
 from docling.datamodel.service.requests import (
-    ConvertDocumentsRequest,
+    BatchConvertSourcesRequest,
+    ConvertSourcesRequest,
     FileSourceRequest,
     GenericChunkDocumentsRequest,
-    HttpSourceRequest,
     S3SourceRequest,
     TargetName,
     TargetRequest,
@@ -70,7 +71,9 @@ from docling.datamodel.service.responses import (
     HealthCheckResponse,
     MessageKind,
     PresignedUrlConvertDocumentResponse,
+    PresignedUrlConvertResponse,
     ReadinessResponse,
+    TaskFailureResult,
     TaskStatusResponse,
     WebsocketMessage,
 )
@@ -83,10 +86,15 @@ from docling_serve.datamodel.responses import (
 from docling.datamodel.service.sources import FileSource, HttpSource, S3Coordinates
 from docling.datamodel.service.targets import (
     InBodyTarget,
+    PresignedUrlTarget,
     ZipTarget,
 )
 from docling.datamodel.service.tasks import TaskType
 from docling_jobkit.datamodel.chunking import ChunkingExportOptions
+from docling_jobkit.datamodel.stored_outcome import (
+    StoredFailureOutcome,
+    StoredSuccessOutcome,
+)
 from docling_jobkit.datamodel.task import Task, TaskSource
 from docling_jobkit.orchestrators.base_orchestrator import (
     BaseOrchestrator,
@@ -98,6 +106,7 @@ from docling_jobkit.orchestrators.rq.orchestrator import RQOrchestrator
 
 from docling_serve.auth import APIKeyAuth, AuthenticationResult
 from docling_serve.helper_functions import DOCLING_VERSIONS, FormDepends, create_upload_file
+from docling_serve.logging_config import setup_logging
 from docling_serve.orchestrator_factory import get_async_orchestrator
 from docling_serve.otel_instrumentation import (
     get_metrics_endpoint_content,
@@ -106,10 +115,13 @@ from docling_serve.otel_instrumentation import (
 from docling_serve.policy import (
     build_service_policy,
     normalize_convert_options,
-    normalize_convert_request,
+    normalize_request,
+    resolve_default_target,
+    validate_batch_convert_request,
     validate_chunk_request,
     validate_convert_options,
     validate_convert_request,
+    validate_target_kind,
 )
 from docling_serve.public_errors import build_public_http_detail
 from docling_serve.response_preparation import prepare_response
@@ -117,41 +129,30 @@ from docling_serve.settings import AsyncEngine, docling_serve_settings
 from docling_serve.storage import get_scratch
 from docling_serve.websocket_notifier import WebsocketNotifier
 
-# Set up custom logging as we'll be intermixes with FastAPI/Uvicorn's logging
-class ColoredLogFormatter(logging.Formatter):
-    COLOR_CODES = {
-        logging.DEBUG: "\033[94m",  # Blue
-        logging.INFO: "\033[92m",  # Green
-        logging.WARNING: "\033[93m",  # Yellow
-        logging.ERROR: "\033[91m",  # Red
-        logging.CRITICAL: "\033[95m",  # Magenta
-    }
-    RESET_CODE = "\033[0m"
-
-    def format(self, record):
-        color = self.COLOR_CODES.get(record.levelno, "")
-        record.levelname = f"{color}{record.levelname}{self.RESET_CODE}"
-        return super().format(record)
+# Pre-import OCR backends that use cysignals (signal handlers must be registered
+# in the main thread; worker threads would raise "signal only works in main thread").
+try:
+    import tesserocr  # noqa: F401
+except (ImportError, Exception):
+    pass
 
 
-logging.basicConfig(
-    level=logging.INFO,  # Set the logging level
-    format="%(levelname)s:\t%(asctime)s - %(name)s - %(message)s",
-    datefmt="%H:%M:%S",
+# Configure logging based on settings
+# This will be called early, but can be reconfigured in __main__.py
+log_level = (
+    docling_serve_settings.log_level.value
+    if docling_serve_settings.log_level
+    else "INFO"
+)
+setup_logging(
+    log_format=docling_serve_settings.log_format.value,
+    log_level=log_level,
+    header_prefix=docling_serve_settings.log_header_prefix,
 )
 
 # when deployed to sagemaker log level is somehow being set to DEBUG
-multipart_logger = logging.getLogger('python_multipart')
-multipart_logger.setLevel(logging.INFO)
-
-docling_logger = logging.getLogger('docling')
-docling_logger.setLevel(logging.INFO)
-
-# Override the formatter with the custom ColoredLogFormatter
-root_logger = logging.getLogger()  # Get the root logger
-for handler in root_logger.handlers:  # Iterate through existing handlers
-    if handler.formatter:
-        handler.setFormatter(ColoredLogFormatter(handler.formatter._fmt))
+logging.getLogger("python_multipart").setLevel(logging.INFO)
+logging.getLogger("docling").setLevel(logging.INFO)
 
 _log = logging.getLogger(__name__)
 
@@ -159,6 +160,31 @@ _log = logging.getLogger(__name__)
 # LocalOrchestrator (which eagerly loads ML models); the RQ orchestrator's
 # implementation is a no-op so this event fires instantly in RQ deployments.
 _models_ready = asyncio.Event()
+
+# Set if the background queue processor task dies with an error. Liveness/
+# readiness then fail so the platform restarts the pod instead of silently
+# serving with a dead orchestrator loop: a dead pub/sub listener stops WebSocket
+# push delivery while polling still succeeds, which is otherwise very hard to
+# detect.
+_queue_processor_failed = asyncio.Event()
+
+
+def _supervise_queue_processor(task: asyncio.Task, failed_event: asyncio.Event) -> None:
+    """Mark the orchestrator loop unhealthy only if it died with an exception.
+
+    A clean return is legitimate: some engines (e.g. KFP) have no in-process
+    queue loop and ``process_queue()`` is a no-op, so completing is expected and
+    must not flag the pod unhealthy. Only an unhandled exception means a
+    supervised loop (RQ/Ray pub/sub listener, Local workers) actually broke.
+    """
+    if task.cancelled():
+        return  # expected on shutdown
+    exc = task.exception()
+    if exc is None:
+        _log.debug("Background queue processor completed without error")
+        return
+    _log.error("Background queue processor died: %s", exc, exc_info=exc)
+    failed_event.set()
 
 
 # Context manager to initialize and clean up the lifespan of the FastAPI app
@@ -181,8 +207,13 @@ async def lifespan(app: FastAPI):
 
     _models_ready.set()
 
-    # Start the background queue processor
+    # Start the background queue processor. If a supervised loop (RQ/Ray pub/sub
+    # listener, Local workers) ever crashes, the done-callback flags the pod
+    # unhealthy so it gets restarted instead of silently dropping WebSocket push.
     queue_task = asyncio.create_task(orchestrator.process_queue())
+    queue_task.add_done_callback(
+        lambda task: _supervise_queue_processor(task, _queue_processor_failed)
+    )
 
     reaper_task = None
     if isinstance(orchestrator, RQOrchestrator):
@@ -232,6 +263,22 @@ def create_app():  # noqa: C901
 
     require_auth = APIKeyAuth(docling_serve_settings.api_key)
     service_policy = build_service_policy(docling_serve_settings)
+
+    # Clients omit fields left at their model default, so the imported request
+    # model's `target` default must match what this deployment actually accepts;
+    # otherwise an omitted target arrives carrying a target kind the policy
+    # rejects with a spurious 422. Subclass the imported model to repopulate the
+    # `target` default with the deployment-resolved one. Because the default is
+    # a concrete value it also flows into the OpenAPI schema automatically. The
+    # subclass keeps the public "ConvertSourcesRequest" schema name.
+    default_target = resolve_default_target(service_policy)
+    default_target_name = TargetName(default_target.kind)
+    ConvertSourcesRequestModel = create_model(
+        "ConvertSourcesRequest",
+        __base__=ConvertSourcesRequest,
+        target=(TargetRequest, default_target),
+    )
+
     app = FastAPI(
         title="Docling Serve",
         docs_url=None if offline_docs_assets else "/swagger",
@@ -299,6 +346,14 @@ def create_app():  # noqa: C901
         redis_url=redis_url,
         metrics_port=docling_serve_settings.metrics_port,
         ray_redis_manager=ray_redis_manager,
+    )
+
+    # Add log context middleware to extract request headers
+    from docling_serve.logging_config import LogContextMiddleware
+
+    app.add_middleware(
+        LogContextMiddleware,
+        header_prefix=docling_serve_settings.log_header_prefix,
     )
 
     origins = docling_serve_settings.cors_origins
@@ -393,14 +448,18 @@ def create_app():  # noqa: C901
 
     async def _enque_source(
         orchestrator: BaseOrchestrator,
-        request: ConvertDocumentsRequest | GenericChunkDocumentsRequest,
+        request: (
+            BatchConvertSourcesRequest
+            | ConvertSourcesRequest
+            | GenericChunkDocumentsRequest
+        ),
         tenant_id: str | None = None,
     ) -> Task:
         sources: list[TaskSource] = []
         for s in request.sources:
             if isinstance(s, FileSourceRequest):
                 sources.append(FileSource.model_validate(s))
-            elif isinstance(s, HttpSourceRequest):
+            elif isinstance(s, HttpSource):
                 sources.append(HttpSource.model_validate(s))
             elif isinstance(s, S3SourceRequest):
                 sources.append(S3Coordinates.model_validate(s))
@@ -409,7 +468,7 @@ def create_app():  # noqa: C901
         chunking_options: BaseChunkerOptions | None = None
         chunking_export_options = ChunkingExportOptions()
         task_type: TaskType
-        if isinstance(request, ConvertDocumentsRequest):
+        if isinstance(request, BatchConvertSourcesRequest | ConvertSourcesRequest):
             task_type = TaskType.CONVERT
             convert_options = request.options
         elif isinstance(request, GenericChunkDocumentsRequest):
@@ -424,9 +483,9 @@ def create_app():  # noqa: C901
 
         # Prepare metadata with tenant_id BEFORE enqueueing
         # This is critical because ray orchestrator reads tenant_id during enqueue()
-        metadata = {}
+        task_metadata: dict[str, str] = {}
         if tenant_id:
-            metadata["tenant_id"] = tenant_id
+            task_metadata["tenant_id"] = tenant_id
             _log.info(
                 f"[TENANT_ID] Preparing to enqueue with tenant_id='{tenant_id}' in metadata"
             )
@@ -441,7 +500,7 @@ def create_app():  # noqa: C901
             chunking_export_options=chunking_export_options,
             target=request.target,
             callbacks=request.callbacks,
-            metadata=metadata,
+            metadata=task_metadata,
         )
 
         _log.info(
@@ -514,6 +573,27 @@ def create_app():  # noqa: C901
         )
         return tenant_id
 
+    def _task_tenant_id(task: Task) -> str:
+        """Return the tenant that owns a task, defaulting to 'default'."""
+        return (task.metadata or {}).get("tenant_id") or "default"
+
+    def _assert_task_tenant(task: Task, tenant_id: str) -> None:
+        """Ensure the caller's tenant owns the task.
+
+        Raises TaskNotFoundError (surfaced as 404) on mismatch rather than 403
+        so a caller cannot probe whether a task UUID exists for another tenant.
+
+        When tenants are not in use, every task is owned by 'default' and every
+        caller resolves to 'default', so this check is transparent.
+        """
+        owner_tenant_id = _task_tenant_id(task)
+        if owner_tenant_id != tenant_id:
+            _log.warning(
+                f"[TENANT_ID] Tenant mismatch for task {task.task_id}: "
+                f"caller='{tenant_id}' owner='{owner_tenant_id}' - denying access"
+            )
+            raise TaskNotFoundError()
+
     async def _wait_task_complete(orchestrator: BaseOrchestrator, task_id: str) -> bool:
         start_time = time.monotonic()
         while True:
@@ -526,10 +606,17 @@ def create_app():  # noqa: C901
                 return False
 
     def _prepare_convert_request(
-        request: ConvertDocumentsRequest,
-    ) -> ConvertDocumentsRequest:
-        normalized_request = normalize_convert_request(request, service_policy)
+        request: ConvertSourcesRequest,
+    ) -> ConvertSourcesRequest:
+        normalized_request = normalize_request(request, service_policy)
         validate_convert_request(normalized_request, service_policy)
+        return normalized_request
+
+    def _prepare_batch_convert_request(
+        request: BatchConvertSourcesRequest,
+    ) -> BatchConvertSourcesRequest:
+        normalized_request = normalize_request(request, service_policy)
+        validate_batch_convert_request(normalized_request, service_policy)
         return normalized_request
 
     def _prepare_chunk_request(
@@ -552,6 +639,37 @@ def create_app():  # noqa: C901
         normalized_options = normalize_convert_options(options, service_policy)
         validate_convert_options(normalized_options, service_policy)
         return normalized_options
+
+    def _validate_multipart_target_type(target_type: TargetName) -> None:
+        validate_target_kind(target_type.value, service_policy)
+
+    def _check_file_upload(files: list[UploadFile], target_type: TargetName) -> None:
+        if len(files) > service_policy.max_sources_per_request:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=(
+                    f"Too many files: {len(files)} exceeds the "
+                    f"maximum of {service_policy.max_sources_per_request}."
+                ),
+            )
+        if (
+            target_type == TargetName.PRESIGNED_URL
+            and not service_policy.artifact_storage_enabled
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=(
+                    "Presigned URL target requires artifact storage to be configured "
+                    "and enabled on the server."
+                ),
+            )
+
+    def _resolve_file_target(target_type: TargetName) -> TargetRequest:
+        if target_type == TargetName.PRESIGNED_URL:
+            return PresignedUrlTarget()
+        if target_type == TargetName.ZIP:
+            return ZipTarget()
+        return InBodyTarget()
 
     ##########################################
     # Downgrade openapi 3.1 to 3.0.x helpers #
@@ -637,6 +755,8 @@ def create_app():  # noqa: C901
 
     @app.get("/health", tags=["health"])
     def health() -> HealthCheckResponse:
+        _log.info("Health check requested")
+        _log.debug("Processing health check")
         return HealthCheckResponse()
     
     @app.get("/ping")
@@ -651,6 +771,12 @@ def create_app():  # noqa: C901
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Models not yet loaded",
+            )
+
+        if _queue_processor_failed.is_set():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Background queue processor is not running.",
             )
 
         orchestrator = get_async_orchestrator()
@@ -674,6 +800,13 @@ def create_app():  # noqa: C901
 
     @app.get("/livez", tags=["health"], include_in_schema=False)
     async def livez() -> HealthCheckResponse:
+        # Fail liveness if the orchestrator loop has died so the platform
+        # restarts the pod (which re-subscribes the pub/sub listener).
+        if _queue_processor_failed.is_set():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Background queue processor is not running.",
+            )
         return HealthCheckResponse()
 
     # API readiness compatibility for OpenShift AI Workbench
@@ -705,7 +838,9 @@ def create_app():  # noqa: C901
     @app.post(
         "/v1/convert/source",
         tags=["convert"],
-        response_model=ConvertDocumentResponse | PresignedUrlConvertDocumentResponse,
+        response_model=ConvertDocumentResponse
+        | PresignedUrlConvertDocumentResponse
+        | PresignedUrlConvertResponse,
         responses={
             200: {
                 "content": {"application/zip": {}},
@@ -717,16 +852,16 @@ def create_app():  # noqa: C901
         background_tasks: BackgroundTasks,
         auth: Annotated[AuthenticationResult, Depends(require_auth)],
         orchestrator: Annotated[BaseOrchestrator, Depends(get_async_orchestrator)],
-        conversion_request: ConvertDocumentsRequest,
+        conversion_request: ConvertSourcesRequestModel,
         x_tenant_id: Annotated[
             str | None, Header(alias=docling_serve_settings.eng_ray_tenant_id_header)
         ] = None,
     ):
-        conversion_request = _prepare_convert_request(conversion_request)
+        prepared_request = _prepare_convert_request(conversion_request)
         tenant_id = _get_tenant_id_from_header(x_tenant_id)
         _log.info(f"[TENANT_ID] process_url endpoint received tenant_id='{tenant_id}'")
         task = await _enque_source(
-            orchestrator=orchestrator, request=conversion_request, tenant_id=tenant_id
+            orchestrator=orchestrator, request=prepared_request, tenant_id=tenant_id
         )
         completed = await _wait_task_complete(
             orchestrator=orchestrator, task_id=task.task_id
@@ -757,7 +892,9 @@ def create_app():  # noqa: C901
     @app.post(
         "/v1/convert/file",
         tags=["convert"],
-        response_model=ConvertDocumentResponse | PresignedUrlConvertDocumentResponse,
+        response_model=ConvertDocumentResponse
+        | PresignedUrlConvertDocumentResponse
+        | PresignedUrlConvertResponse,
         responses={
             200: {
                 "content": {"application/zip": {}},
@@ -772,15 +909,17 @@ def create_app():  # noqa: C901
         options: Annotated[
             ConvertDocumentsRequestOptions, FormDepends(ConvertDocumentsRequestOptions)
         ],
-        target_type: Annotated[TargetName, Form()] = TargetName.INBODY,
+        target_type: Annotated[TargetName, Form()] = default_target_name,
         x_tenant_id: Annotated[
             str | None, Header(alias=docling_serve_settings.eng_ray_tenant_id_header)
         ] = None,
     ):
+        _check_file_upload(files, target_type)
         options = _prepare_convert_options(options)
+        _validate_multipart_target_type(target_type)
         tenant_id = _get_tenant_id_from_header(x_tenant_id)
         _log.info(f"[TENANT_ID] process_file endpoint received tenant_id='{tenant_id}'")
-        target = InBodyTarget() if target_type == TargetName.INBODY else ZipTarget()
+        target = _resolve_file_target(target_type)
         task = await _enque_file(
             task_type=TaskType.CONVERT,
             orchestrator=orchestrator,
@@ -826,18 +965,18 @@ def create_app():  # noqa: C901
     async def process_url_async(
         auth: Annotated[AuthenticationResult, Depends(require_auth)],
         orchestrator: Annotated[BaseOrchestrator, Depends(get_async_orchestrator)],
-        conversion_request: ConvertDocumentsRequest,
+        conversion_request: ConvertSourcesRequestModel,
         x_tenant_id: Annotated[
             str | None, Header(alias=docling_serve_settings.eng_ray_tenant_id_header)
         ] = None,
     ):
-        conversion_request = _prepare_convert_request(conversion_request)
+        prepared_request = _prepare_convert_request(conversion_request)
         tenant_id = _get_tenant_id_from_header(x_tenant_id)
         _log.info(
             f"[TENANT_ID] process_url_async endpoint received tenant_id='{tenant_id}'"
         )
         task = await _enque_source(
-            orchestrator=orchestrator, request=conversion_request, tenant_id=tenant_id
+            orchestrator=orchestrator, request=prepared_request, tenant_id=tenant_id
         )
         task_queue_position = await orchestrator.get_queue_position(
             task_id=task.task_id
@@ -848,7 +987,44 @@ def create_app():  # noqa: C901
             task_status=task.task_status,
             task_position=task_queue_position,
             task_meta=task.processing_meta,
-            error_message=getattr(task, "error_message", None),
+            error_message=task.error_message,
+            failure=task.failure,
+        )
+
+    @app.post(
+        "/v1/convert/source/batch",
+        tags=["convert"],
+        response_model=TaskStatusResponse,
+    )
+    async def process_source_batch(
+        auth: Annotated[AuthenticationResult, Depends(require_auth)],
+        orchestrator: Annotated[BaseOrchestrator, Depends(get_async_orchestrator)],
+        conversion_request: BatchConvertSourcesRequest,
+        x_tenant_id: Annotated[
+            str | None, Header(alias=docling_serve_settings.eng_ray_tenant_id_header)
+        ] = None,
+    ):
+        conversion_request = _prepare_batch_convert_request(conversion_request)
+        tenant_id = _get_tenant_id_from_header(x_tenant_id)
+        _log.info(
+            f"[TENANT_ID] process_source_batch endpoint received tenant_id='{tenant_id}'"
+        )
+        task = await _enque_source(
+            orchestrator=orchestrator,
+            request=conversion_request,
+            tenant_id=tenant_id,
+        )
+        task_queue_position = await orchestrator.get_queue_position(
+            task_id=task.task_id
+        )
+        return TaskStatusResponse(
+            task_id=task.task_id,
+            task_type=task.task_type,
+            task_status=task.task_status,
+            task_position=task_queue_position,
+            task_meta=task.processing_meta,
+            error_message=task.error_message,
+            failure=task.failure,
         )
 
     # Convert a document from file(s) using the async api
@@ -865,17 +1041,19 @@ def create_app():  # noqa: C901
         options: Annotated[
             ConvertDocumentsRequestOptions, FormDepends(ConvertDocumentsRequestOptions)
         ],
-        target_type: Annotated[TargetName, Form()] = TargetName.INBODY,
+        target_type: Annotated[TargetName, Form()] = default_target_name,
         x_tenant_id: Annotated[
             str | None, Header(alias=docling_serve_settings.eng_ray_tenant_id_header)
         ] = None,
     ):
+        _check_file_upload(files, target_type)
         options = _prepare_convert_options(options)
+        _validate_multipart_target_type(target_type)
         tenant_id = _get_tenant_id_from_header(x_tenant_id)
         _log.info(
             f"[TENANT_ID] process_file_async endpoint received tenant_id='{tenant_id}'"
         )
-        target = InBodyTarget() if target_type == TargetName.INBODY else ZipTarget()
+        target = _resolve_file_target(target_type)
         task = await _enque_file(
             task_type=TaskType.CONVERT,
             orchestrator=orchestrator,
@@ -896,7 +1074,8 @@ def create_app():  # noqa: C901
             task_status=task.task_status,
             task_position=task_queue_position,
             task_meta=task.processing_meta,
-            error_message=getattr(task, "error_message", None),
+            error_message=task.error_message,
+            failure=task.failure,
         )
 
     # Chunking endpoints
@@ -939,7 +1118,8 @@ def create_app():  # noqa: C901
                 task_status=task.task_status,
                 task_position=task_queue_position,
                 task_meta=task.processing_meta,
-                error_message=getattr(task, "error_message", None),
+                error_message=task.error_message,
+                failure=task.failure,
             )
 
         @app.post(
@@ -986,7 +1166,13 @@ def create_app():  # noqa: C901
                 Header(alias=docling_serve_settings.eng_ray_tenant_id_header),
             ] = None,
         ):
+            if target_type == TargetName.PRESIGNED_URL:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail="presigned_url target is not supported for chunk endpoints.",
+                )
             convert_options = _prepare_convert_options(convert_options)
+            _validate_multipart_target_type(target_type)
             tenant_id = _get_tenant_id_from_header(x_tenant_id)
             _log.info(
                 f"[TENANT_ID] chunk_file_async ({path_name}) endpoint received tenant_id='{tenant_id}'"
@@ -1014,7 +1200,8 @@ def create_app():  # noqa: C901
                 task_status=task.task_status,
                 task_position=task_queue_position,
                 task_meta=task.processing_meta,
-                error_message=getattr(task, "error_message", None),
+                error_message=task.error_message,
+                failure=task.failure,
             )
 
         @app.post(
@@ -1121,7 +1308,13 @@ def create_app():  # noqa: C901
                 Header(alias=docling_serve_settings.eng_ray_tenant_id_header),
             ] = None,
         ):
+            if target_type == TargetName.PRESIGNED_URL:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail="presigned_url target is not supported for chunk endpoints.",
+                )
             convert_options = _prepare_convert_options(convert_options)
+            _validate_multipart_target_type(target_type)
             tenant_id = _get_tenant_id_from_header(x_tenant_id)
             _log.info(
                 f"[TENANT_ID] chunk_file ({path_name}) endpoint received tenant_id='{tenant_id}'"
@@ -1259,13 +1452,18 @@ def create_app():  # noqa: C901
         auth: Annotated[AuthenticationResult, Depends(require_auth)],
         orchestrator: Annotated[BaseOrchestrator, Depends(get_async_orchestrator)],
         task_id: str,
+        x_tenant_id: Annotated[
+            str | None, Header(alias=docling_serve_settings.eng_ray_tenant_id_header)
+        ] = None,
         wait: Annotated[
             float,
             Query(description="Number of seconds to wait for a completed status."),
         ] = 0.0,
     ):
+        tenant_id = _get_tenant_id_from_header(x_tenant_id)
         try:
             task = await orchestrator.task_status(task_id=task_id, wait=wait)
+            _assert_task_tenant(task, tenant_id)
             task_queue_position = await orchestrator.get_queue_position(task_id=task_id)
             queue_size = await orchestrator.queue_size()
         except TaskNotFoundError:
@@ -1277,7 +1475,8 @@ def create_app():  # noqa: C901
             task_position=task_queue_position,
             task_meta=task.processing_meta,
             queue_size=queue_size,
-            error_message=getattr(task, "error_message", None),
+            error_message=task.error_message,
+            failure=task.failure,
         )
 
     # Task status websocket
@@ -1289,19 +1488,28 @@ def create_app():  # noqa: C901
         orchestrator: Annotated[BaseOrchestrator, Depends(get_async_orchestrator)],
         task_id: str,
         api_key: Annotated[str, Query()] = "",
+        tenant_id: Annotated[str | None, Query()] = None,
     ):
         if docling_serve_settings.api_key:
+            # WebSocket clients on this endpoint authenticate via query
+            # parameter. Note that query-parameter keys may be captured in
+            # proxy/access logs.
             if api_key != docling_serve_settings.api_key:
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Api key is required as ?api_key=SECRET.",
+                    detail=(
+                        "Api key is required as the ?api_key=SECRET query parameter."
+                    ),
                 )
+
+        tenant_id = tenant_id or "default"
 
         assert isinstance(orchestrator.notifier, WebsocketNotifier)
         await websocket.accept()
 
         try:
             task = await orchestrator.task_status(task_id=task_id)
+            _assert_task_tenant(task, tenant_id)
         except RedisBackpressureError:
             await websocket.send_text(
                 WebsocketMessage(
@@ -1331,7 +1539,8 @@ def create_app():  # noqa: C901
                 task_status=task.task_status,
                 task_position=task_queue_position,
                 task_meta=task.processing_meta,
-                error_message=getattr(task, "error_message", None),
+                error_message=task.error_message,
+                failure=task.failure,
             )
             await websocket.send_text(
                 WebsocketMessage(
@@ -1339,6 +1548,10 @@ def create_app():  # noqa: C901
                 ).model_dump_json()
             )
             while True:
+                # Refresh from the orchestrator each iteration so the client
+                # always sees current state — and the socket is closed on
+                # completion — even if the real-time pub/sub push was missed.
+                task = await orchestrator.task_status(task_id=task_id)
                 task_queue_position = await orchestrator.get_queue_position(
                     task_id=task_id
                 )
@@ -1348,17 +1561,27 @@ def create_app():  # noqa: C901
                     task_status=task.task_status,
                     task_position=task_queue_position,
                     task_meta=task.processing_meta,
-                    error_message=getattr(task, "error_message", None),
+                    error_message=task.error_message,
+                    failure=task.failure,
                 )
                 await websocket.send_text(
                     WebsocketMessage(
                         message=MessageKind.UPDATE, task=task_response
                     ).model_dump_json()
                 )
+                if task.is_completed():
+                    await websocket.close()
+                    return
                 # each client message will be interpreted as a request for update
                 msg = await websocket.receive_text()
                 _log.debug(f"Received message: {msg}")
 
+        except TaskNotFoundError:
+            # Task was removed (e.g. reaped) while streaming; close gracefully.
+            try:
+                await websocket.close()
+            except Exception:
+                pass
         except RedisBackpressureError:
             try:
                 await websocket.send_text(
@@ -1384,7 +1607,9 @@ def create_app():  # noqa: C901
         tags=["tasks"],
         response_model=ConvertDocumentResponse
         | PresignedUrlConvertDocumentResponse
-        | ChunkDocumentResponse,
+        | PresignedUrlConvertResponse
+        | ChunkDocumentResponse
+        | TaskFailureResult,
         responses={
             200: {
                 "content": {"application/zip": {}},
@@ -1396,14 +1621,26 @@ def create_app():  # noqa: C901
         orchestrator: Annotated[BaseOrchestrator, Depends(get_async_orchestrator)],
         background_tasks: BackgroundTasks,
         task_id: str,
+        x_tenant_id: Annotated[
+            str | None, Header(alias=docling_serve_settings.eng_ray_tenant_id_header)
+        ] = None,
     ):
+        tenant_id = _get_tenant_id_from_header(x_tenant_id)
         try:
-            task_result = await orchestrator.task_result(task_id=task_id)
-            if task_result is None:
+            task = await orchestrator.task_status(task_id=task_id)
+            _assert_task_tenant(task, tenant_id)
+            outcome = await orchestrator.task_outcome(task_id=task_id)
+            if outcome is None:
                 raise HTTPException(
                     status_code=404,
                     detail="Task result not found. Please wait for a completion status.",
                 )
+            if isinstance(outcome, StoredFailureOutcome):
+                return TaskFailureResult(failure=outcome.failure)
+            if isinstance(outcome, StoredSuccessOutcome):
+                task_result = outcome.result
+            else:
+                task_result = outcome
             response = await prepare_response(
                 task_id=task_id,
                 task_result=task_result,

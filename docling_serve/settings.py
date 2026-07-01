@@ -6,7 +6,13 @@ from pathlib import Path
 from typing import Any, Optional, Union
 
 import yaml
-from pydantic import AliasChoices, AnyUrl, Field, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    Field,
+    PositiveFloat,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -40,9 +46,13 @@ class LogLevel(str, enum.Enum):
     DEBUG = "DEBUG"
 
 
+class LogFormat(str, enum.Enum):
+    TEXT = "text"
+    JSON = "json"
+
+
 class AsyncEngine(str, enum.Enum):
     LOCAL = "local"
-    KFP = "kfp"
     RQ = "rq"
     RAY = "ray"
 
@@ -110,6 +120,8 @@ class DoclingServeSettings(BaseSettings):
     enable_ui: bool = False
     api_host: str = "localhost"
     log_level: Optional[LogLevel] = None
+    log_format: LogFormat = LogFormat.TEXT
+    log_header_prefix: str = "X-Docling-Log-"
     artifacts_path: Optional[Path] = None
     static_path: Optional[Path] = None
     scratch_path: Optional[Path] = None
@@ -134,6 +146,21 @@ class DoclingServeSettings(BaseSettings):
     max_document_timeout: float = 3_600 * 24 * 7  # 7 days
     max_num_pages: int = sys.maxsize
     max_file_size: int = sys.maxsize
+    max_sources_per_request: int = 3
+
+    # Image export policy
+    allowed_image_export_modes: Optional[list[str]] = None  # None = all modes allowed
+    max_images_scale: float = 2.0
+
+    # Artifact storage (required for PresignedUrlTarget)
+    artifact_storage_enabled: bool = False
+    artifact_storage_endpoint: str = ""
+    artifact_storage_verify_ssl: bool = True
+    artifact_storage_bucket: str = ""
+    artifact_storage_access_key: str = ""
+    artifact_storage_secret_key: str = ""
+    artifact_storage_key_prefix: str = "converted/"
+    artifact_storage_presign_ttl_seconds: int = 3600
 
     # Threading pipeline
     queue_max_size: Optional[int] = None
@@ -156,6 +183,7 @@ class DoclingServeSettings(BaseSettings):
     eng_loc_share_models: bool = False
     # RQ engine
     eng_rq_redis_url: str = ""
+    eng_rq_queue_name: str = "convert"
     eng_rq_results_prefix: str = "docling:results"
     eng_rq_sub_channel: str = "docling:updates"
     eng_rq_results_ttl: int = 3_600 * 4  # 4 hours default
@@ -171,16 +199,6 @@ class DoclingServeSettings(BaseSettings):
     eng_rq_redis_gate_status_poll_wait_timeout: float = 5.0
     eng_rq_zombie_reaper_interval: float = 300.0
     eng_rq_zombie_reaper_max_age: float = 3600.0
-    # KFP engine
-    eng_kfp_endpoint: Optional[AnyUrl] = None
-    eng_kfp_token: Optional[str] = None
-    eng_kfp_ca_cert_path: Optional[str] = None
-    eng_kfp_self_callback_endpoint: Optional[str] = None
-    eng_kfp_self_callback_token_path: Optional[Path] = None
-    eng_kfp_self_callback_ca_cert_path: Optional[Path] = None
-
-    eng_kfp_experimental: bool = False
-
     # Fair Ray engine
     # Redis Configuration
     eng_ray_redis_url: str = ""
@@ -222,10 +240,12 @@ class DoclingServeSettings(BaseSettings):
     # Ray Serve Autoscaling
     eng_ray_min_actors: int = 1
     eng_ray_max_actors: int = 10
-    eng_ray_target_requests_per_replica: int = 1
+    eng_ray_target_requests_per_replica: PositiveFloat = 1.0
     # Hard cap on concurrent in-flight requests per replica.
     # None -> follow eng_ray_target_requests_per_replica.
     eng_ray_max_ongoing_requests_per_replica: Optional[int] = None
+    # Hard cap on converter Serve replicas per Ray node. None -> no cap.
+    eng_ray_converter_max_replicas_per_node: Optional[int] = None
     eng_ray_upscale_delay_s: float = 30.0
     eng_ray_downscale_delay_s: float = 600.0
     # None -> use Ray Serve defaults.
@@ -245,8 +265,10 @@ class DoclingServeSettings(BaseSettings):
     eng_ray_max_page_slice_parallelism: Optional[int] = None
     eng_ray_coordinator_min_actors: Optional[int] = None
     eng_ray_coordinator_max_actors: Optional[int] = None
-    eng_ray_coordinator_target_requests_per_replica: Optional[int] = None
+    eng_ray_coordinator_target_requests_per_replica: Optional[PositiveFloat] = None
     eng_ray_coordinator_max_ongoing_requests_per_replica: int = 8
+    # Hard cap on coordinator Serve replicas per Ray node. None -> no cap.
+    eng_ray_coordinator_max_replicas_per_node: Optional[int] = None
     eng_ray_coordinator_actor_num_cpus: float = 0.25
     eng_ray_coordinator_actor_memory_request: Optional[str] = None
 
@@ -349,6 +371,9 @@ class DoclingServeSettings(BaseSettings):
     custom_ocr_presets: dict[str, Any] = Field(default_factory=dict)
     allowed_ocr_kinds: Optional[list[str]] = None
 
+    # Target Control
+    allowed_target_types: Optional[list[str]] = None
+
     @classmethod
     def settings_customise_sources(
         cls,
@@ -411,6 +436,8 @@ class DoclingServeSettings(BaseSettings):
         "allowed_layout_presets",
         "allowed_ocr_presets",
         "allowed_ocr_kinds",
+        "allowed_target_types",
+        "allowed_image_export_modes",
         mode="before",
     )
     @classmethod
@@ -459,17 +486,6 @@ class DoclingServeSettings(BaseSettings):
 
     @model_validator(mode="after")
     def engine_settings(self) -> Self:
-        # Validate KFP engine settings
-        if self.eng_kind == AsyncEngine.KFP:
-            if self.eng_kfp_endpoint is None:
-                raise ValueError("KFP endpoint is required when using the KFP engine.")
-
-        if self.eng_kind == AsyncEngine.KFP:
-            if not self.eng_kfp_experimental:
-                raise ValueError(
-                    "KFP is not yet working. To enable the development version, you must set DOCLING_SERVE_ENG_KFP_EXPERIMENTAL=true."
-                )
-
         if self.eng_kind == AsyncEngine.RQ:
             if not self.eng_rq_redis_url:
                 raise ValueError("RQ Redis url is required when using the RQ engine.")

@@ -36,9 +36,12 @@ THe following table describes the options to configure the Docling Serve app.
 | CLI option | ENV | Default | Description |
 | -----------|-----|---------|-------------|
 | `-v, --verbose` | `DOCLING_SERVE_LOG_LEVEL` | `WARNING` | Set the verbosity level. CLI: `-v` for INFO, `-vv` for DEBUG. ENV: `WARNING`, `INFO`, or `DEBUG` (case-insensitive). CLI flag takes precedence over ENV. |
+|  | `DOCLING_SERVE_LOG_FORMAT` | `text` | Log output format. Options: `text` (colored console logs) or `json` (structured JSON logs). JSON format is recommended for production deployments and log aggregation systems. |
+|  | `DOCLING_SERVE_LOG_HEADER_PREFIX` | `X-Docling-Log-` | Prefix for HTTP request headers that should be propagated to logs. Headers matching this prefix (case-insensitive) will be extracted and included as structured fields in all logs during the request lifecycle. Example: `X-Docling-Log-RequestID` becomes `RequestID` in logs. |
 | `--artifacts-path` | `DOCLING_SERVE_ARTIFACTS_PATH` | unset | If set to a valid directory, the model weights will be loaded from this path |
 |  | `DOCLING_SERVE_STATIC_PATH` | unset | If set to a valid directory, the static assets for the docs and UI will be loaded from this path |
 |  | `DOCLING_SERVE_SCRATCH_PATH` |  | If set, this directory will be used as scratch workspace, e.g. storing the results before they get requested. If unset, a temporary created is created for this purpose. |
+|  | `DOCLING_SERVE_ARTIFACT_STORAGE_VERIFY_SSL` | `true` | Whether the server-managed artifact storage verifies TLS certificates. Set this to `false` for local HTTP or self-signed MinIO setups. |
 | `--enable-ui` | `DOCLING_SERVE_ENABLE_UI` | `false` | Enable the demonstrator UI. |
 |  | `DOCLING_SERVE_ENABLE_MANAGEMENT_ENDPOINTS` | `false` | If enabled, the `/v1/memory` endpoints will provide memory statistics, otherwise it will return a forbidden 403 error. |
 |  | `DOCLING_SERVE_SHOW_VERSION_INFO` | `true` | If enabled, the `/version` endpoint will provide the Docling package versions, otherwise it will return a forbidden 403 error. |
@@ -53,6 +56,7 @@ THe following table describes the options to configure the Docling Serve app.
 |  | `DOCLING_SERVE_MAX_DOCUMENT_TIMEOUT` | `604800` (7 days) | The maximum time for processing a document. |
 |  | `DOCLING_SERVE_MAX_NUM_PAGES` |  | The maximum number of pages for a document to be processed. |
 |  | `DOCLING_SERVE_MAX_FILE_SIZE` |  | The maximum file size for a document to be processed. |
+|  | `DOCLING_SERVE_ALLOWED_TARGET_TYPES` | `null` (all allowed) | List of allowed target kinds. Accepts JSON array or comma-separated string. Use this to block specific response targets such as `inbody`, `zip`, `presigned_url`, `s3`, or `put`. |
 |  | `DOCLING_SERVE_SYNC_POLL_INTERVAL` | `2` | Number of seconds to sleep between polling the task status in the sync endpoints. |
 |  | `DOCLING_SERVE_MAX_SYNC_WAIT` | `120` | Max number of seconds a synchronous endpoint is waiting for the task completion. |
 |  | `DOCLING_SERVE_LOAD_MODELS_AT_BOOT` | `True` | If enabled, the models for the default options will be loaded at boot. |
@@ -66,7 +70,7 @@ THe following table describes the options to configure the Docling Serve app.
 |  | `DOCLING_SERVE_CORS_METHODS` | `["*"]` | A list of HTTP methods that should be allowed for cross-origin requests. |
 |  | `DOCLING_SERVE_CORS_HEADERS` | `["*"]` | A list of HTTP request headers that should be supported for cross-origin requests. |
 |  | `DOCLING_SERVE_API_KEY` | | If specified, all the API requests must contain the header `X-Api-Key` with this value. |
-|  | `DOCLING_SERVE_ENG_KIND` | `local` | The compute engine to use for the async tasks. Possible values are `local`, `rq` and `kfp`. See below for more configurations of the engines. |
+|  | `DOCLING_SERVE_ENG_KIND` | `local` | The compute engine to use for the async tasks. Possible values are `local`, `rq` and `ray`. See below for more configurations of the engines. |
 
 ### Configuration File Support
 
@@ -77,6 +81,88 @@ Docling Serve supports loading configuration from YAML or JSON files. This is us
 | `DOCLING_SERVE_CONFIG_FILE` | | Path to a YAML or JSON configuration file. Environment variables take precedence over config file values. See [examples/config.yaml](../examples/config.yaml) and [examples/config.json](../examples/config.json) for examples. |
 
 **Priority Order:** Environment variables > Config file > Defaults
+
+### Logging Configuration
+
+Docling Serve supports both traditional text-based logging and structured JSON logging. JSON logging is particularly useful for production deployments, log aggregation systems, and observability platforms.
+
+#### JSON Logging
+
+Enable JSON logging by setting:
+
+```bash
+export DOCLING_SERVE_LOG_FORMAT=json
+```
+
+Or in a YAML config file:
+
+```yaml
+log_format: json
+```
+
+**JSON Log Format Example:**
+
+```json
+{
+  "timestamp": "2026-05-27T13:11:27.767Z",
+  "level": "INFO",
+  "logger": "docling_serve.app",
+  "message": "Processing document",
+  "RequestID": "req-123",
+  "UserID": "user-456"
+}
+```
+
+#### Request Header Propagation
+
+HTTP request headers can be automatically propagated to all logs during a request's lifecycle. This is useful for tracking requests across distributed systems, correlating logs, and debugging.
+
+**Configuration:**
+
+```bash
+# Set the header prefix (default: X-Docling-Log-)
+export DOCLING_SERVE_LOG_HEADER_PREFIX="X-Docling-Log-"
+```
+
+**Usage Example:**
+
+When making a request with custom headers:
+
+```bash
+curl -H "X-Docling-Log-RequestID: req-abc-123" \
+     -H "X-Docling-Log-UserID: user-xyz-456" \
+     -H "X-Docling-Log-TraceID: trace-789" \
+     http://localhost:5001/v1/convert
+```
+
+All logs generated during this request will include:
+
+```json
+{
+  "timestamp": "2026-05-27T13:11:27.767Z",
+  "level": "INFO",
+  "logger": "docling_serve.app",
+  "message": "Starting document conversion",
+  "RequestID": "req-abc-123",
+  "UserID": "user-xyz-456",
+  "TraceID": "trace-789"
+}
+```
+
+**Key Features:**
+
+- Headers are matched case-insensitively
+- The prefix is stripped from the header name in logs (e.g., `X-Docling-Log-RequestID` → `RequestID`)
+- Works with both JSON and text log formats (though structured fields are only visible in JSON)
+- Thread-safe and works correctly with async operations
+- Context is automatically cleared after each request
+
+**Common Use Cases:**
+
+- **Request Tracking:** Add `X-Docling-Log-RequestID` to track requests across services
+- **User Context:** Add `X-Docling-Log-UserID` to associate logs with specific users
+- **Distributed Tracing:** Add `X-Docling-Log-TraceID` for correlation with tracing systems
+- **Session Tracking:** Add `X-Docling-Log-SessionID` to group related requests
 
 ### DoclingConverterManager Configuration
 
@@ -187,6 +273,7 @@ The following table describes the options to configure the Docling Serve RQ engi
 | ENV | Default | Description |
 |-----|---------|-------------|
 | `DOCLING_SERVE_ENG_RQ_REDIS_URL` | (required) | The connection Redis url, e.g. `redis://localhost:6373/` |
+| `DOCLING_SERVE_ENG_RQ_QUEUE_NAME` | `convert` | The RQ queue name used by API instances and workers. Set this to route jobs to a non-default queue. |
 | `DOCLING_SERVE_ENG_RQ_RESULTS_PREFIX` | `docling:results` | The prefix used for storing the results in Redis. |
 | `DOCLING_SERVE_ENG_RQ_SUB_CHANNEL` | `docling:updates` | The channel key name used for storing communicating updates between the workers and the orchestrator. |
 | `DOCLING_SERVE_ENG_RQ_RESULTS_TTL` | `14400` (4 hours) | Time To Live (in seconds) for RQ job results in Redis. This controls how long job results are kept before being automatically deleted. |
@@ -201,19 +288,6 @@ The following table describes the options to configure the Docling Serve RQ engi
 - **Large deployments (10+ workers):** Set `DOCLING_SERVE_ENG_RQ_REDIS_MAX_CONNECTIONS=150-200`
 - **Timeout settings:** Only set if experiencing connection issues. Start with 5.0 seconds for both timeouts.
 - Ensure your Redis server's `maxclients` setting can accommodate all connections from all docling-serve instances and RQ workers
-
-#### KFP engine
-
-The following table describes the options to configure the Docling Serve KFP engine.
-
-| ENV | Default | Description |
-|-----|---------|-------------|
-| `DOCLING_SERVE_ENG_KFP_ENDPOINT` |  | Must be set to the Kubeflow Pipeline endpoint. When using the in-cluster deployment, make sure to use the cluster endpoint, e.g. `https://NAME.NAMESPACE.svc.cluster.local:8888`  |
-| `DOCLING_SERVE_ENG_KFP_TOKEN` |  | The authentication token for KFP. For in-cluster deployment, the app will load automatically the token of the ServiceAccount. |
-| `DOCLING_SERVE_ENG_KFP_CA_CERT_PATH` |  | Path to the CA certificates for the KFP endpoint. For in-cluster deployment, the app will load automatically the internal CA. |
-| `DOCLING_SERVE_ENG_KFP_SELF_CALLBACK_ENDPOINT` |  | If set, it enables internal callbacks providing status update of the KFP job. Usually something like `https://NAME.NAMESPACE.svc.cluster.local:5001/v1/callback/task/progress`. |
-| `DOCLING_SERVE_ENG_KFP_SELF_CALLBACK_TOKEN_PATH` |  | The token used for authenticating the progress callback. For cluster-internal workloads, use `/run/secrets/kubernetes.io/serviceaccount/token`. |
-| `DOCLING_SERVE_ENG_KFP_SELF_CALLBACK_CA_CERT_PATH` |  | The CA certificate for the progress callback. For cluster-inetrnal workloads, use `/var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt`. |
 
 ### Gradio UI
 
