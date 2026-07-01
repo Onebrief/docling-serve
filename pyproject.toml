@@ -1,6 +1,6 @@
 [project]
 name = "docling-serve"
-version = "1.20.0"  # DO NOT EDIT, updated automatically
+version = "1.26.0"  # DO NOT EDIT, updated automatically
 description = "Running Docling as a service"
 license = {text = "MIT"}
 authors = [
@@ -33,9 +33,9 @@ classifiers = [
 ]
 requires-python = ">=3.10"
 dependencies = [
-    "docling>=2.88.0,<3.0.0",
-    "docling-core>=2.45.0",
-    "docling-jobkit[rq]>=1.20.0,<2.0.0",
+    "docling-slim[standard,service-client,models-remote]>=2.104.0,<3.0.0",
+    "docling-core>=2.79.0",
+    "docling-jobkit[rq]>=2.0.0,<3.0.0",
     "fastapi[standard]<0.137.0",
     "httpx~=0.28",
     "pydantic~=2.10",
@@ -72,6 +72,7 @@ flash-attn = [
 [dependency-groups]
 dev = [
     "asgi-lifespan~=2.0",
+    "numpy<2.5.0",
     "httpx",
     "pydantic",
     "pydantic-settings",
@@ -125,6 +126,12 @@ rocm = [
   "pytorch-triton-rocm>=3.3.1 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
 
+rocm72 = [
+    "torch>=2.7.1 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "torchvision>=0.22.1 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "triton-rocm ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+
 [[tool.uv.dependency-metadata]]
 name = "flash-attn"
 version = "2.8.3"
@@ -142,6 +149,7 @@ conflicts = [
     { group = "cu128" },
     { group = "cu130" },
     { group = "rocm" },
+    { group = "rocm72" },
   ],
 ]
 environments = ["sys_platform != 'darwin' or platform_machine != 'x86_64'"]
@@ -161,6 +169,7 @@ torch = [
   { index = "pytorch-cu128", group = "cu128", marker = "sys_platform == 'linux'" },
   { index = "pytorch-cu130", group = "cu130", marker = "sys_platform == 'linux'" },
   { index = "pytorch-rocm", group = "rocm", marker = "sys_platform == 'linux'" },
+  { index = "pytorch-rocm72", group = "rocm72", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
 ]
 
 torchvision = [
@@ -171,13 +180,19 @@ torchvision = [
   { index = "pytorch-cu128", group = "cu128", marker = "sys_platform == 'linux'" },
   { index = "pytorch-cu130", group = "cu130", marker = "sys_platform == 'linux'" },
   { index = "pytorch-rocm", group = "rocm", marker = "sys_platform == 'linux'" },
+  { index = "pytorch-rocm72", group = "rocm72", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
 ]
 
 pytorch-triton-rocm = [
   { index = "pytorch-rocm", marker = "sys_platform == 'linux'" },
 ]
 
-# docling = { git = "https://github.com/docling-project/docling/", rev = "main" }
+triton-rocm = [
+    { index = "pytorch-rocm72", group = "rocm72", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" }
+]
+
+# docling-slim = { git = "https://github.com/docling-project/docling/", rev = "main" }
+# docling-jobkit = { git = "https://github.com/docling-project/docling-jobkit/", rev = "main" }
 # docling-jobkit = { path = "../docling-jobkit", editable = true }
 
 [[tool.uv.index]]
@@ -213,6 +228,11 @@ explicit = true
 [[tool.uv.index]]
 name = "pytorch-rocm"
 url = "https://download.pytorch.org/whl/rocm6.3"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-rocm72"
+url = "https://download.pytorch.org/whl/rocm7.2"
 explicit = true
 
 [tool.setuptools.packages.find]
@@ -308,8 +328,6 @@ module = [
     "easyocr.*",
     "tesserocr.*",
     "requests.*",
-    "kfp.*",
-    "kfp_server_api.*",
     "mlx_vlm.*",
     "mlx.*",
     "scalar_fastapi.*",

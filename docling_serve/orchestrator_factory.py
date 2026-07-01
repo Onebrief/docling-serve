@@ -9,13 +9,98 @@ from docling_serve.storage import get_scratch
 _log = logging.getLogger(__name__)
 
 
+def _build_cm_config():
+    from docling_jobkit.convert.manager import DoclingConverterManagerConfig
+
+    return DoclingConverterManagerConfig(
+        artifacts_path=docling_serve_settings.artifacts_path,
+        options_cache_size=docling_serve_settings.options_cache_size,
+        enable_remote_services=docling_serve_settings.enable_remote_services,
+        allow_external_plugins=docling_serve_settings.allow_external_plugins,
+        max_num_pages=docling_serve_settings.max_num_pages,
+        max_file_size=docling_serve_settings.max_file_size,
+        queue_max_size=docling_serve_settings.queue_max_size,
+        ocr_batch_size=docling_serve_settings.ocr_batch_size,
+        layout_batch_size=docling_serve_settings.layout_batch_size,
+        table_batch_size=docling_serve_settings.table_batch_size,
+        batch_polling_interval_seconds=docling_serve_settings.batch_polling_interval_seconds,
+        # VLM Pipeline Control
+        default_vlm_preset=docling_serve_settings.default_vlm_preset,
+        allowed_vlm_presets=docling_serve_settings.allowed_vlm_presets,
+        custom_vlm_presets=docling_serve_settings.custom_vlm_presets,
+        allowed_vlm_engines=docling_serve_settings.allowed_vlm_engines,
+        allow_custom_vlm_config=docling_serve_settings.allow_custom_vlm_config,
+        # Picture Description Control
+        default_picture_description_preset=docling_serve_settings.default_picture_description_preset,
+        allowed_picture_description_presets=docling_serve_settings.allowed_picture_description_presets,
+        custom_picture_description_presets=docling_serve_settings.custom_picture_description_presets,
+        allowed_picture_description_engines=docling_serve_settings.allowed_picture_description_engines,
+        allow_custom_picture_description_config=docling_serve_settings.allow_custom_picture_description_config,
+        # Code/Formula Control
+        default_code_formula_preset=docling_serve_settings.default_code_formula_preset,
+        allowed_code_formula_presets=docling_serve_settings.allowed_code_formula_presets,
+        custom_code_formula_presets=docling_serve_settings.custom_code_formula_presets,
+        allowed_code_formula_engines=docling_serve_settings.allowed_code_formula_engines,
+        allow_custom_code_formula_config=docling_serve_settings.allow_custom_code_formula_config,
+        # Picture Classification Control
+        default_picture_classification_preset=docling_serve_settings.default_picture_classification_preset,
+        allowed_picture_classification_presets=docling_serve_settings.allowed_picture_classification_presets,
+        custom_picture_classification_presets=docling_serve_settings.custom_picture_classification_presets,
+        allow_custom_picture_classification_config=docling_serve_settings.allow_custom_picture_classification_config,
+        # Table Structure Control
+        default_table_structure_kind=docling_serve_settings.default_table_structure_kind,
+        allowed_table_structure_kinds=docling_serve_settings.allowed_table_structure_kinds,
+        default_table_structure_preset=docling_serve_settings.default_table_structure_preset,
+        allowed_table_structure_presets=docling_serve_settings.allowed_table_structure_presets,
+        custom_table_structure_presets=docling_serve_settings.custom_table_structure_presets,
+        allow_custom_table_structure_config=docling_serve_settings.allow_custom_table_structure_config,
+        # Layout Control
+        default_layout_kind=docling_serve_settings.default_layout_kind,
+        allowed_layout_kinds=docling_serve_settings.allowed_layout_kinds,
+        default_layout_preset=docling_serve_settings.default_layout_preset,
+        allowed_layout_presets=docling_serve_settings.allowed_layout_presets,
+        custom_layout_presets=docling_serve_settings.custom_layout_presets,
+        allow_custom_layout_config=docling_serve_settings.allow_custom_layout_config,
+        # OCR Control
+        default_ocr_preset=docling_serve_settings.default_ocr_preset,
+        default_ocr_kind=docling_serve_settings.default_ocr_kind,
+        allowed_ocr_presets=docling_serve_settings.allowed_ocr_presets,
+        custom_ocr_presets=docling_serve_settings.custom_ocr_presets,
+        allowed_ocr_kinds=docling_serve_settings.allowed_ocr_kinds,
+        allow_custom_ocr_config=docling_serve_settings.allow_custom_ocr_config,
+    )
+
+
+def _build_s3_presigned_config():
+    """Build presigned artifact storage config, or return None when disabled.
+
+    The managed storage prefix and URL TTL are owned by docling-serve settings and
+    injected into jobkit here before any orchestrator is constructed.
+    """
+    if not docling_serve_settings.artifact_storage_enabled:
+        return None
+
+    from docling.datamodel.service.sources import S3Coordinates
+    from docling_jobkit.config.target_config import S3PresignedConfig
+
+    coords = S3Coordinates(
+        endpoint=docling_serve_settings.artifact_storage_endpoint,
+        verify_ssl=docling_serve_settings.artifact_storage_verify_ssl,
+        access_key=docling_serve_settings.artifact_storage_access_key,
+        secret_key=docling_serve_settings.artifact_storage_secret_key,
+        bucket=docling_serve_settings.artifact_storage_bucket,
+        key_prefix=docling_serve_settings.artifact_storage_key_prefix,
+    )
+    return S3PresignedConfig(
+        s3_coords=coords,
+        url_expiration=docling_serve_settings.artifact_storage_presign_ttl_seconds,
+    )
+
+
 @lru_cache
 def get_async_orchestrator() -> BaseOrchestrator:
     if docling_serve_settings.eng_kind == AsyncEngine.LOCAL:
-        from docling_jobkit.convert.manager import (
-            DoclingConverterManager,
-            DoclingConverterManagerConfig,
-        )
+        from docling_jobkit.convert.manager import DoclingConverterManager
         from docling_jobkit.orchestrators.local.orchestrator import (
             LocalOrchestrator,
             LocalOrchestratorConfig,
@@ -26,66 +111,10 @@ def get_async_orchestrator() -> BaseOrchestrator:
             shared_models=docling_serve_settings.eng_loc_share_models,
             scratch_dir=get_scratch(),
             result_removal_delay=docling_serve_settings.result_removal_delay,
+            s3_presigned_config=_build_s3_presigned_config(),
         )
 
-        cm_config = DoclingConverterManagerConfig(
-            artifacts_path=docling_serve_settings.artifacts_path,
-            options_cache_size=docling_serve_settings.options_cache_size,
-            enable_remote_services=docling_serve_settings.enable_remote_services,
-            allow_external_plugins=docling_serve_settings.allow_external_plugins,
-            max_num_pages=docling_serve_settings.max_num_pages,
-            max_file_size=docling_serve_settings.max_file_size,
-            queue_max_size=docling_serve_settings.queue_max_size,
-            ocr_batch_size=docling_serve_settings.ocr_batch_size,
-            layout_batch_size=docling_serve_settings.layout_batch_size,
-            table_batch_size=docling_serve_settings.table_batch_size,
-            batch_polling_interval_seconds=docling_serve_settings.batch_polling_interval_seconds,
-            # VLM Pipeline Control
-            default_vlm_preset=docling_serve_settings.default_vlm_preset,
-            allowed_vlm_presets=docling_serve_settings.allowed_vlm_presets,
-            custom_vlm_presets=docling_serve_settings.custom_vlm_presets,
-            allowed_vlm_engines=docling_serve_settings.allowed_vlm_engines,
-            allow_custom_vlm_config=docling_serve_settings.allow_custom_vlm_config,
-            # Picture Description Control
-            default_picture_description_preset=docling_serve_settings.default_picture_description_preset,
-            allowed_picture_description_presets=docling_serve_settings.allowed_picture_description_presets,
-            custom_picture_description_presets=docling_serve_settings.custom_picture_description_presets,
-            allowed_picture_description_engines=docling_serve_settings.allowed_picture_description_engines,
-            allow_custom_picture_description_config=docling_serve_settings.allow_custom_picture_description_config,
-            # Code/Formula Control
-            default_code_formula_preset=docling_serve_settings.default_code_formula_preset,
-            allowed_code_formula_presets=docling_serve_settings.allowed_code_formula_presets,
-            custom_code_formula_presets=docling_serve_settings.custom_code_formula_presets,
-            allowed_code_formula_engines=docling_serve_settings.allowed_code_formula_engines,
-            allow_custom_code_formula_config=docling_serve_settings.allow_custom_code_formula_config,
-            # Picture Classification Control
-            default_picture_classification_preset=docling_serve_settings.default_picture_classification_preset,
-            allowed_picture_classification_presets=docling_serve_settings.allowed_picture_classification_presets,
-            custom_picture_classification_presets=docling_serve_settings.custom_picture_classification_presets,
-            allow_custom_picture_classification_config=docling_serve_settings.allow_custom_picture_classification_config,
-            # Table Structure Control
-            default_table_structure_kind=docling_serve_settings.default_table_structure_kind,
-            allowed_table_structure_kinds=docling_serve_settings.allowed_table_structure_kinds,
-            default_table_structure_preset=docling_serve_settings.default_table_structure_preset,
-            allowed_table_structure_presets=docling_serve_settings.allowed_table_structure_presets,
-            custom_table_structure_presets=docling_serve_settings.custom_table_structure_presets,
-            allow_custom_table_structure_config=docling_serve_settings.allow_custom_table_structure_config,
-            # Layout Control
-            default_layout_kind=docling_serve_settings.default_layout_kind,
-            allowed_layout_kinds=docling_serve_settings.allowed_layout_kinds,
-            default_layout_preset=docling_serve_settings.default_layout_preset,
-            allowed_layout_presets=docling_serve_settings.allowed_layout_presets,
-            custom_layout_presets=docling_serve_settings.custom_layout_presets,
-            allow_custom_layout_config=docling_serve_settings.allow_custom_layout_config,
-            # OCR Control
-            default_ocr_preset=docling_serve_settings.default_ocr_preset,
-            default_ocr_kind=docling_serve_settings.default_ocr_kind,
-            allowed_ocr_presets=docling_serve_settings.allowed_ocr_presets,
-            custom_ocr_presets=docling_serve_settings.custom_ocr_presets,
-            allowed_ocr_kinds=docling_serve_settings.allowed_ocr_kinds,
-            allow_custom_ocr_config=docling_serve_settings.allow_custom_ocr_config,
-        )
-        cm = DoclingConverterManager(config=cm_config)
+        cm = DoclingConverterManager(config=_build_cm_config())
 
         return LocalOrchestrator(config=local_config, converter_manager=cm)
 
@@ -99,6 +128,7 @@ def get_async_orchestrator() -> BaseOrchestrator:
 
         rq_config = RQOrchestratorConfig(
             redis_url=docling_serve_settings.eng_rq_redis_url,
+            queue_name=docling_serve_settings.eng_rq_queue_name,
             results_prefix=docling_serve_settings.eng_rq_results_prefix,
             sub_channel=docling_serve_settings.eng_rq_sub_channel,
             scratch_dir=get_scratch(),
@@ -115,6 +145,7 @@ def get_async_orchestrator() -> BaseOrchestrator:
             zombie_reaper_interval=docling_serve_settings.eng_rq_zombie_reaper_interval,
             zombie_reaper_max_age=docling_serve_settings.eng_rq_zombie_reaper_max_age,
             result_removal_delay=docling_serve_settings.result_removal_delay,
+            s3_presigned_config=_build_s3_presigned_config(),
         )
 
         orchestrator = RQOrchestrator(config=rq_config)
@@ -125,28 +156,8 @@ def get_async_orchestrator() -> BaseOrchestrator:
             )
         return orchestrator
 
-    elif docling_serve_settings.eng_kind == AsyncEngine.KFP:
-        from docling_jobkit.orchestrators.kfp.orchestrator import (
-            KfpOrchestrator,
-            KfpOrchestratorConfig,
-        )
-
-        kfp_config = KfpOrchestratorConfig(
-            endpoint=docling_serve_settings.eng_kfp_endpoint,
-            token=docling_serve_settings.eng_kfp_token,
-            ca_cert_path=docling_serve_settings.eng_kfp_ca_cert_path,
-            self_callback_endpoint=docling_serve_settings.eng_kfp_self_callback_endpoint,
-            self_callback_token_path=docling_serve_settings.eng_kfp_self_callback_token_path,
-            self_callback_ca_cert_path=docling_serve_settings.eng_kfp_self_callback_ca_cert_path,
-        )
-
-        return KfpOrchestrator(config=kfp_config)
-
     elif docling_serve_settings.eng_kind == AsyncEngine.RAY:
-        from docling_jobkit.convert.manager import (
-            DoclingConverterManager,
-            DoclingConverterManagerConfig,
-        )
+        from docling_jobkit.convert.manager import DoclingConverterManager
         from docling_jobkit.orchestrators.ray.config import (
             RayOrchestratorConfig,
         )
@@ -160,69 +171,11 @@ def get_async_orchestrator() -> BaseOrchestrator:
             else docling_serve_settings.eng_ray_max_concurrent_tasks
         )
 
-        # Create converter manager config
-        cm_config = DoclingConverterManagerConfig(
-            artifacts_path=docling_serve_settings.artifacts_path,
-            options_cache_size=docling_serve_settings.options_cache_size,
-            enable_remote_services=docling_serve_settings.enable_remote_services,
-            allow_external_plugins=docling_serve_settings.allow_external_plugins,
-            allow_custom_vlm_config=docling_serve_settings.allow_custom_vlm_config,
-            allow_custom_picture_description_config=docling_serve_settings.allow_custom_picture_description_config,
-            allow_custom_code_formula_config=docling_serve_settings.allow_custom_code_formula_config,
-            # VLM Pipeline Control
-            default_vlm_preset=docling_serve_settings.default_vlm_preset,
-            allowed_vlm_presets=docling_serve_settings.allowed_vlm_presets,
-            custom_vlm_presets=docling_serve_settings.custom_vlm_presets,
-            allowed_vlm_engines=docling_serve_settings.allowed_vlm_engines,
-            # Picture Description Control
-            default_picture_description_preset=docling_serve_settings.default_picture_description_preset,
-            allowed_picture_description_presets=docling_serve_settings.allowed_picture_description_presets,
-            custom_picture_description_presets=docling_serve_settings.custom_picture_description_presets,
-            allowed_picture_description_engines=docling_serve_settings.allowed_picture_description_engines,
-            # Code/Formula Control
-            default_code_formula_preset=docling_serve_settings.default_code_formula_preset,
-            allowed_code_formula_presets=docling_serve_settings.allowed_code_formula_presets,
-            custom_code_formula_presets=docling_serve_settings.custom_code_formula_presets,
-            allowed_code_formula_engines=docling_serve_settings.allowed_code_formula_engines,
-            # Picture Classification Control
-            default_picture_classification_preset=docling_serve_settings.default_picture_classification_preset,
-            allowed_picture_classification_presets=docling_serve_settings.allowed_picture_classification_presets,
-            custom_picture_classification_presets=docling_serve_settings.custom_picture_classification_presets,
-            allow_custom_picture_classification_config=docling_serve_settings.allow_custom_picture_classification_config,
-            # Table Structure Control
-            default_table_structure_kind=docling_serve_settings.default_table_structure_kind,
-            allowed_table_structure_kinds=docling_serve_settings.allowed_table_structure_kinds,
-            default_table_structure_preset=docling_serve_settings.default_table_structure_preset,
-            allowed_table_structure_presets=docling_serve_settings.allowed_table_structure_presets,
-            custom_table_structure_presets=docling_serve_settings.custom_table_structure_presets,
-            allow_custom_table_structure_config=docling_serve_settings.allow_custom_table_structure_config,
-            # Layout Control
-            default_layout_kind=docling_serve_settings.default_layout_kind,
-            allowed_layout_kinds=docling_serve_settings.allowed_layout_kinds,
-            default_layout_preset=docling_serve_settings.default_layout_preset,
-            allowed_layout_presets=docling_serve_settings.allowed_layout_presets,
-            custom_layout_presets=docling_serve_settings.custom_layout_presets,
-            allow_custom_layout_config=docling_serve_settings.allow_custom_layout_config,
-            # OCR Control
-            default_ocr_preset=docling_serve_settings.default_ocr_preset,
-            default_ocr_kind=docling_serve_settings.default_ocr_kind,
-            allowed_ocr_presets=docling_serve_settings.allowed_ocr_presets,
-            custom_ocr_presets=docling_serve_settings.custom_ocr_presets,
-            allowed_ocr_kinds=docling_serve_settings.allowed_ocr_kinds,
-            allow_custom_ocr_config=docling_serve_settings.allow_custom_ocr_config,
-            # Other options
-            max_num_pages=docling_serve_settings.max_num_pages,
-            max_file_size=docling_serve_settings.max_file_size,
-            queue_max_size=docling_serve_settings.queue_max_size,
-            ocr_batch_size=docling_serve_settings.ocr_batch_size,
-            layout_batch_size=docling_serve_settings.layout_batch_size,
-            table_batch_size=docling_serve_settings.table_batch_size,
-            batch_polling_interval_seconds=docling_serve_settings.batch_polling_interval_seconds,
-        )
-        cm = DoclingConverterManager(config=cm_config)
+        cm = DoclingConverterManager(config=_build_cm_config())
 
         # Create Fair Ray orchestrator config
         ray_config = RayOrchestratorConfig(
+            s3_presigned_config=_build_s3_presigned_config(),
             # Redis Configuration
             redis_url=docling_serve_settings.eng_ray_redis_url,
             redis_max_connections=docling_serve_settings.eng_ray_redis_max_connections,
@@ -263,6 +216,7 @@ def get_async_orchestrator() -> BaseOrchestrator:
             max_actors=docling_serve_settings.eng_ray_max_actors,
             target_requests_per_replica=docling_serve_settings.eng_ray_target_requests_per_replica,
             max_ongoing_requests_per_replica=docling_serve_settings.eng_ray_max_ongoing_requests_per_replica,
+            converter_max_replicas_per_node=docling_serve_settings.eng_ray_converter_max_replicas_per_node,
             upscale_delay_s=docling_serve_settings.eng_ray_upscale_delay_s,
             downscale_delay_s=docling_serve_settings.eng_ray_downscale_delay_s,
             graceful_shutdown_wait_loop_s=docling_serve_settings.eng_ray_graceful_shutdown_wait_loop_s,
@@ -275,6 +229,7 @@ def get_async_orchestrator() -> BaseOrchestrator:
             coordinator_max_actors=docling_serve_settings.eng_ray_coordinator_max_actors,
             coordinator_target_requests_per_replica=docling_serve_settings.eng_ray_coordinator_target_requests_per_replica,
             coordinator_max_ongoing_requests_per_replica=docling_serve_settings.eng_ray_coordinator_max_ongoing_requests_per_replica,
+            coordinator_max_replicas_per_node=docling_serve_settings.eng_ray_coordinator_max_replicas_per_node,
             coordinator_actor_num_cpus=docling_serve_settings.eng_ray_coordinator_actor_num_cpus,
             coordinator_actor_memory_request=docling_serve_settings.eng_ray_coordinator_actor_memory_request,
             # Fault Tolerance & Retry
