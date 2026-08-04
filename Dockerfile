@@ -18,7 +18,11 @@
 # pkg-config; we add cmake and the codec dev headers via apk. (apk fetches over
 # HTTPS to virtualapk.cgr.dev — works in CI runners; a corporate MITM proxy
 # like Zscaler will break the TLS handshake locally.)
-FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:3.13.14-dev AS opencv-builder
+ARG PYTHON_MAJOR=3
+ARG PYTHON_MINOR=13
+ARG PYTHON_PATCH=14
+ARG PYTHON_VERSION=${PYTHON_MAJOR}.${PYTHON_MINOR}.${PYTHON_PATCH}
+FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:${PYTHON_VERSION}-dev AS opencv-builder
 USER 0
 # Install the packages the cv2 compile link-checks against. Keep this line
 # stable — adding packages here invalidates the `pip wheel` layer below and
@@ -49,7 +53,7 @@ RUN pip wheel --no-binary opencv-python-headless \
         "opencv-python-headless==${OPENCV_HEADLESS_VERSION}" \
         -w /out
 
-FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:3.13.14-dev AS build
+FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:${PYTHON_VERSION}-dev AS build
 ARG TARGETARCH
 ENV UV_COMPILE_BYTECODE=0 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=0
 
@@ -96,9 +100,26 @@ RUN HF_HUB_DOWNLOAD_TIMEOUT="90" \
     HF_HUB_ETAG_TIMEOUT="90" \
     /app/.venv/bin/docling-tools models download -o "${DOCLING_SERVE_ARTIFACTS_PATH}" ${MODELS_LIST}
 
+ARG PYTHON_MAJOR
+ARG PYTHON_MINOR
+RUN SITE=/app/.venv/lib/python${PYTHON_MAJOR}.${PYTHON_MINOR}/site-packages && \
+    mkdir -p "$SITE/torch" "$SITE/triton" "$SITE/nvidia/cudnn" "$SITE/nvidia/cublas"
+
+FROM build AS venv-rest
+ARG PYTHON_MAJOR
+ARG PYTHON_MINOR
+RUN SITE=/app/.venv/lib/python${PYTHON_MAJOR}.${PYTHON_MINOR}/site-packages && \
+    rm -rf "$SITE/torch" "$SITE/triton" "$SITE/nvidia"
+
+FROM build AS nvidia-rest
+ARG PYTHON_MAJOR
+ARG PYTHON_MINOR
+RUN SITE=/app/.venv/lib/python${PYTHON_MAJOR}.${PYTHON_MINOR}/site-packages && \
+    rm -rf "$SITE/nvidia/cudnn" "$SITE/nvidia/cublas"
+
 # Multistage release build
 
-FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:3.13.14 AS release
+FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:${PYTHON_VERSION} AS release
 
 WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -122,7 +143,18 @@ COPY --from=opencv-builder /usr/lib/libsharpyuv.so.0* /usr/lib/
 # (ONNX-based) — picked over tesserocr because tesserocr pulls in cysignals and
 # trips OpenSSL's FIPS self-test in FIPS-enforced environments (FATAL FIPS
 # SELFTEST FAILURE at startup).
-COPY --from=build --chown=65532:65532 /app/ /app/
+ARG PYTHON_MAJOR
+ARG PYTHON_MINOR
+ARG SITE=/app/.venv/lib/python${PYTHON_MAJOR}.${PYTHON_MINOR}/site-packages
+COPY --from=venv-rest --chown=65532:65532 /app/.venv /app/.venv
+COPY --from=build --chown=65532:65532 ${SITE}/torch ${SITE}/torch
+COPY --from=build --chown=65532:65532 ${SITE}/triton ${SITE}/triton
+COPY --from=nvidia-rest --chown=65532:65532 ${SITE}/nvidia ${SITE}/nvidia
+COPY --from=build --chown=65532:65532 ${SITE}/nvidia/cudnn ${SITE}/nvidia/cudnn
+COPY --from=build --chown=65532:65532 ${SITE}/nvidia/cublas ${SITE}/nvidia/cublas
+COPY --from=build --chown=65532:65532 /app/docling_serve /app/docling_serve
+COPY --from=build --chown=65532:65532 /app/pyproject.toml /app/uv.lock /app/README.md /app/
+COPY --from=build --chown=65532:65532 /app/.cache/docling/models /app/.cache/docling/models
 ENV \
     DOCLING_SERVE_ARTIFACTS_PATH=/app/.cache/docling/models
 
