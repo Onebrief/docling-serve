@@ -2,6 +2,7 @@ name: Docker Build Publish
 
 on:
   workflow_dispatch: {}
+  pull_request: {}
   push:
     branches:
       - main
@@ -21,7 +22,7 @@ jobs:
       security-events: write
     uses: ./.github/workflows/_docker-build.yaml
     with:
-      image-name: onebrief/docling-ob
+      image-name: ob/docling-ob
       dockerfile: Dockerfile
       context: .
       provenance: false

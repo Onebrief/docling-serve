@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       image-name:
-        description: Image name under the Nexus registry (e.g. onebrief/vllm)
+        description: Image name under the Nexus registry (e.g. ob/vllm)
         required: true
         type: string
       dockerfile:
