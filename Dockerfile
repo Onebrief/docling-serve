@@ -21,7 +21,8 @@
 ARG PYTHON_MAJOR=3
 ARG PYTHON_MINOR=13
 ARG PYTHON_PATCH=14
-ARG PYTHON_VERSION=${PYTHON_MAJOR}.${PYTHON_MINOR}.${PYTHON_PATCH}
+ARG PYTHON_REVISION=r3
+ARG PYTHON_VERSION=${PYTHON_MAJOR}.${PYTHON_MINOR}.${PYTHON_PATCH}-${PYTHON_REVISION}
 FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:${PYTHON_VERSION}-dev AS opencv-builder
 USER 0
 # Install the packages the cv2 compile link-checks against. Keep this line
@@ -85,7 +86,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     && /usr/bin/python -m uv pip uninstall --python /app/.venv/bin/python opencv-python opencv-python-headless \
     && /usr/bin/python -m uv pip install --python /app/.venv/bin/python /tmp/opencv_python_headless-*.whl \
     && /usr/bin/python -m uv pip install --python /app/.venv/bin/python "${ORT_PKG}>=1.19.0" \
-    && /usr/bin/python -m uv pip install --python /app/.venv/bin/python "cryptography>=46.0.5" "pillow>=12.1.1"
+    && /usr/bin/python -m uv pip install --python /app/.venv/bin/python "cryptography>=46.0.5" "pillow>=12.3.0"
 
 # Copy project source and install the docling_serve package itself (cheap vs. the deps layer above)
 COPY ./docling_serve ./docling_serve

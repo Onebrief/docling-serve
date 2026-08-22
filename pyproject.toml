@@ -140,6 +140,9 @@ requires-dist = ["torch", "einops"]
 [tool.uv]
 package = true
 default-groups = ["dev", "pypi"]
+constraint-dependencies = [
+    "pillow>=12.3.0",
+]
 conflicts = [
   [
     { group = "pypi" },
