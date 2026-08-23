@@ -49,7 +49,10 @@ ENV ENABLE_HEADLESS=1 \
                 -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF \
                 -DBUILD_EXAMPLES=OFF -DBUILD_opencv_apps=OFF"
 RUN pip install --no-cache-dir --upgrade pip wheel setuptools
-RUN pip wheel --no-binary opencv-python-headless \
+
+RUN JOBS=$(nproc); if [ "$JOBS" -gt 8 ]; then JOBS=8; fi; \
+    MAKEFLAGS="-j${JOBS}" CMAKE_BUILD_PARALLEL_LEVEL="${JOBS}" \
+    pip wheel --no-binary opencv-python-headless \
         "opencv-python-headless==${OPENCV_HEADLESS_VERSION}" \
         -w /out
 

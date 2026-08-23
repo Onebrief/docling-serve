@@ -40,6 +40,7 @@ on:
 jobs:
   build:
     name: Build ${{ matrix.arch }} (${{ inputs.image-name }})
+    timeout-minutes: 90
     permissions:
       actions: read
       contents: read
