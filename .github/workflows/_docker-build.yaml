@@ -59,7 +59,7 @@ jobs:
         }
     outputs:
       digestsid: ${{ steps.setout.outputs.digestsid }}
-    runs-on: runs-on=${{ github.run_id }}-build-${{ matrix.arch }}/pool=stepsecurity-x64
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-arm-24.04-4core' || format('runs-on={0}-build-{1}/pool=stepsecurity-x64', github.run_id, matrix.arch) }}
     steps:
       - uses: runs-on/action@cd2b598b0515d39d78c38a02d529db87d2196d1e #v2
         if: matrix.arch != 'arm64'
