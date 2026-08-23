@@ -40,6 +40,7 @@ on:
 jobs:
   build:
     name: Build ${{ matrix.arch }} (${{ inputs.image-name }})
+    timeout-minutes: 90
     permissions:
       actions: read
       contents: read
@@ -58,9 +59,10 @@ jobs:
         }
     outputs:
       digestsid: ${{ steps.setout.outputs.digestsid }}
-    runs-on: runs-on=${{ github.run_id }}-build-${{ matrix.arch }}/pool=stepsecurity-x64
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-arm-24.04-4core' || format('runs-on={0}-build-{1}/pool=stepsecurity-x64', github.run_id, matrix.arch) }}
     steps:
       - uses: runs-on/action@cd2b598b0515d39d78c38a02d529db87d2196d1e #v2
+        if: matrix.arch != 'arm64'
 
       - name: Harden Runner
         uses: step-security/harden-runner@95d9a5deda9de15063e7595e9719c11c38c90ae2 # v2.13.2
@@ -81,6 +83,7 @@ jobs:
         id: buildkit
         env:
           ENDPOINT: tcp://${{ fromJson(env.ENDPOINTS)[matrix.arch] }}:1234
+          ARCH: ${{ matrix.arch }}
         run: |
           docker buildx create --name remote --driver remote "$ENDPOINT" >/dev/null 2>&1 || true
           if docker buildx inspect --bootstrap remote >/dev/null 2>&1; then
@@ -91,11 +94,11 @@ jobs:
           fi
 
       - name: Mount docker layer cache volume
-        if: steps.buildkit.outputs.up != 'true'
+        if: matrix.arch != 'arm64' && steps.buildkit.outputs.up != 'true'
         uses: runs-on/snapshot@d3bcc424e9b751601b1ff830243cd72ad21c44ba # v1.1.1
         with:
           path: /var/lib/docker
-          volume_size: 60
+          volume_size: 80
           version: docker
 
       - name: Set up local buildx
@@ -106,7 +109,7 @@ jobs:
           keep-state: true
 
       - name: Clear old cache items
-        if: steps.buildkit.outputs.up != 'true'
+        if: matrix.arch != 'arm64' && steps.buildkit.outputs.up != 'true'
         run: |
           docker buildx prune -af --filter "until=48h" --min-free-space=10gb
 

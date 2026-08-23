@@ -49,7 +49,23 @@ ENV ENABLE_HEADLESS=1 \
                 -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF \
                 -DBUILD_EXAMPLES=OFF -DBUILD_opencv_apps=OFF"
 RUN pip install --no-cache-dir --upgrade pip wheel setuptools
-RUN pip wheel --no-binary opencv-python-headless \
+
+RUN set -eu; \
+    if [ -r /sys/fs/cgroup/cpu.max ]; then read -r quota period < /sys/fs/cgroup/cpu.max; else quota=max; fi; \
+    if [ "$quota" = max ]; then CPUS=$(nproc); else CPUS=$((quota / period)); fi; \
+    [ "$CPUS" -ge 1 ] || CPUS=1; \
+    if [ -r /sys/fs/cgroup/memory.max ]; then MEM=$(cat /sys/fs/cgroup/memory.max); else MEM=max; fi; \
+    case $MEM in \
+        *[!0-9]*) MEMGB=$(awk '/MemTotal/{printf "%d", $2/1048576}' /proc/meminfo) ;; \
+        *)        MEMGB=$((MEM / 1073741824)) ;; \
+    esac; \
+    JOBS=$CPUS; \
+    if [ "$((MEMGB / 2))" -lt "$JOBS" ]; then JOBS=$((MEMGB / 2)); fi; \
+    if [ "$JOBS" -gt 16 ]; then JOBS=16; fi; \
+    if [ "$JOBS" -lt 1 ]; then JOBS=1; fi; \
+    echo "opencv build: -j${JOBS} (cpus=${CPUS} mem=${MEMGB}GiB)"; \
+    MAKEFLAGS="-j${JOBS}" CMAKE_BUILD_PARALLEL_LEVEL="${JOBS}" \
+    pip wheel --no-binary opencv-python-headless \
         "opencv-python-headless==${OPENCV_HEADLESS_VERSION}" \
         -w /out
 
