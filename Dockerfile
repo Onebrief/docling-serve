@@ -176,6 +176,7 @@ COPY --from=build --chown=65532:65532 /app/.cache/docling/models /app/.cache/doc
 ENV \
     DOCLING_SERVE_ARTIFACTS_PATH=/app/.cache/docling/models
 
+RUN ["/app/.venv/bin/python", "-c", "import glob, os, shutil\nfor site in glob.glob('/app/.venv/lib/python*/site-packages'):\n    for name in ('triton', 'nvidia'):\n        top = os.path.join(site, name)\n        if os.path.isdir(top) and not any(files for _, _, files in os.walk(top)):\n            shutil.rmtree(top)"]
 USER nonroot
 
 # Smoke test: fail the build if the app can't be imported/assembled in the final
