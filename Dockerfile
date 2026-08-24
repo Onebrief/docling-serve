@@ -21,7 +21,8 @@
 ARG PYTHON_MAJOR=3
 ARG PYTHON_MINOR=13
 ARG PYTHON_PATCH=14
-ARG PYTHON_VERSION=${PYTHON_MAJOR}.${PYTHON_MINOR}.${PYTHON_PATCH}
+ARG PYTHON_REVISION=r3
+ARG PYTHON_VERSION=${PYTHON_MAJOR}.${PYTHON_MINOR}.${PYTHON_PATCH}-${PYTHON_REVISION}
 FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:${PYTHON_VERSION}-dev AS opencv-builder
 USER 0
 # Install the packages the cv2 compile link-checks against. Keep this line
@@ -49,12 +50,29 @@ ENV ENABLE_HEADLESS=1 \
                 -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF \
                 -DBUILD_EXAMPLES=OFF -DBUILD_opencv_apps=OFF"
 RUN pip install --no-cache-dir --upgrade pip wheel setuptools
-RUN pip wheel --no-binary opencv-python-headless \
+
+RUN set -eu; \
+    if [ -r /sys/fs/cgroup/cpu.max ]; then read -r quota period < /sys/fs/cgroup/cpu.max; else quota=max; fi; \
+    if [ "$quota" = max ]; then CPUS=$(nproc); else CPUS=$((quota / period)); fi; \
+    [ "$CPUS" -ge 1 ] || CPUS=1; \
+    if [ -r /sys/fs/cgroup/memory.max ]; then MEM=$(cat /sys/fs/cgroup/memory.max); else MEM=max; fi; \
+    case $MEM in \
+        *[!0-9]*) MEMGB=$(awk '/MemTotal/{printf "%d", $2/1048576}' /proc/meminfo) ;; \
+        *)        MEMGB=$((MEM / 1073741824)) ;; \
+    esac; \
+    JOBS=$CPUS; \
+    if [ "$((MEMGB / 2))" -lt "$JOBS" ]; then JOBS=$((MEMGB / 2)); fi; \
+    if [ "$JOBS" -gt 16 ]; then JOBS=16; fi; \
+    if [ "$JOBS" -lt 1 ]; then JOBS=1; fi; \
+    echo "opencv build: -j${JOBS} (cpus=${CPUS} mem=${MEMGB}GiB)"; \
+    MAKEFLAGS="-j${JOBS}" CMAKE_BUILD_PARALLEL_LEVEL="${JOBS}" \
+    pip wheel --no-binary opencv-python-headless \
         "opencv-python-headless==${OPENCV_HEADLESS_VERSION}" \
         -w /out
 
 FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:${PYTHON_VERSION}-dev AS build
 ARG TARGETARCH
+ARG ACCEL=auto
 ENV UV_COMPILE_BYTECODE=0 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=0
 
 WORKDIR /app
@@ -72,11 +90,11 @@ RUN /usr/bin/python -m uv venv /app/.venv
 # stage above), and pin cryptography + pillow to CVE-patched versions. rapidocr stays in as our
 # OCR engine: ONNX-based, no cysignals, FIPS-safe.
 #
-# Arch split: amd64 uses CUDA (cu128 torch group + onnxruntime-gpu); arm64 is
-# CPU-only because onnxruntime-gpu publishes no aarch64 wheels and the realistic
-# arm64 deploy targets (Graviton/Ampere) have no NVIDIA GPUs anyway.
+# Arch split (ACCEL=auto): amd64 uses CUDA (cu128 torch group + onnxruntime-gpu);
+# arm64 is CPU-only because onnxruntime-gpu publishes no aarch64 wheels and the
+# realistic arm64 deploy targets (Graviton/Ampere) have no NVIDIA GPUs anyway.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    if [ "$TARGETARCH" = "arm64" ]; then \
+    if [ "$ACCEL" = "cpu" ] || [ "$TARGETARCH" = "arm64" ]; then \
         TORCH_GROUP=cpu; ORT_PKG=onnxruntime; \
     else \
         TORCH_GROUP=cu128; ORT_PKG=onnxruntime-gpu; \
@@ -84,8 +102,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     && /usr/bin/python -m uv sync --frozen --python /app/.venv/bin/python --group "$TORCH_GROUP" --no-group dev --no-group pypi --no-install-project \
     && /usr/bin/python -m uv pip uninstall --python /app/.venv/bin/python opencv-python opencv-python-headless \
     && /usr/bin/python -m uv pip install --python /app/.venv/bin/python /tmp/opencv_python_headless-*.whl \
-    && /usr/bin/python -m uv pip install --python /app/.venv/bin/python "${ORT_PKG}>=1.19.0" \
-    && /usr/bin/python -m uv pip install --python /app/.venv/bin/python "cryptography>=46.0.5" "pillow>=12.1.1"
+    && if [ "$ACCEL" = "cpu" ]; then \
+        echo "ACCEL=cpu: skipping ${ORT_PKG} on purpose (see note below)"; \
+    else \
+        /usr/bin/python -m uv pip install --python /app/.venv/bin/python "${ORT_PKG}>=1.19.0"; \
+    fi \
+    && /usr/bin/python -m uv pip install --python /app/.venv/bin/python "cryptography>=46.0.5" "pillow>=12.3.0"
 
 # Copy project source and install the docling_serve package itself (cheap vs. the deps layer above)
 COPY ./docling_serve ./docling_serve
@@ -158,6 +180,7 @@ COPY --from=build --chown=65532:65532 /app/.cache/docling/models /app/.cache/doc
 ENV \
     DOCLING_SERVE_ARTIFACTS_PATH=/app/.cache/docling/models
 
+RUN ["/app/.venv/bin/python", "-c", "import glob, os, shutil\nfor site in glob.glob('/app/.venv/lib/python*/site-packages'):\n    for name in ('triton', 'nvidia'):\n        top = os.path.join(site, name)\n        if os.path.isdir(top) and not any(files for _, _, files in os.walk(top)):\n            shutil.rmtree(top)"]
 USER nonroot
 
 # Smoke test: fail the build if the app can't be imported/assembled in the final
