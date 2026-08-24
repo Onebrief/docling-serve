@@ -102,7 +102,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     && /usr/bin/python -m uv sync --frozen --python /app/.venv/bin/python --group "$TORCH_GROUP" --no-group dev --no-group pypi --no-install-project \
     && /usr/bin/python -m uv pip uninstall --python /app/.venv/bin/python opencv-python opencv-python-headless \
     && /usr/bin/python -m uv pip install --python /app/.venv/bin/python /tmp/opencv_python_headless-*.whl \
-    && /usr/bin/python -m uv pip install --python /app/.venv/bin/python "${ORT_PKG}>=1.19.0" \
+    && if [ "$ACCEL" = "cpu" ]; then \
+        echo "ACCEL=cpu: skipping ${ORT_PKG} on purpose (see note below)"; \
+    else \
+        /usr/bin/python -m uv pip install --python /app/.venv/bin/python "${ORT_PKG}>=1.19.0"; \
+    fi \
     && /usr/bin/python -m uv pip install --python /app/.venv/bin/python "cryptography>=46.0.5" "pillow>=12.3.0"
 
 # Copy project source and install the docling_serve package itself (cheap vs. the deps layer above)
