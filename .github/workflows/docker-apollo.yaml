@@ -1,0 +1,27 @@
+name: Docker Build Publish (Apollo, CPU-only)
+
+# Apollo/Mission Manager has no GPUs. Models are served remotely by Striveworks
+# so it needs a CPU-only build. The default workflow (docker.yaml) picks the
+# accelerator from TARGETARCH, where amd64 means CUDA.
+on:
+  workflow_dispatch: {}
+permissions: {}
+
+jobs:
+  build:
+    name: Build (CPU)
+    permissions:
+      actions: read
+      contents: read
+      checks: write
+      id-token: write
+      security-events: write
+    uses: ./.github/workflows/_docker-build.yaml
+    with:
+      image-name: ob/docling-ob-cpu
+      dockerfile: Dockerfile
+      context: .
+      provenance: false
+      platforms: '[{"arch":"amd64"}]'
+      build-args: ACCEL=cpu
+    secrets: inherit
