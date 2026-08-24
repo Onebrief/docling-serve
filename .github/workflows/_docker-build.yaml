@@ -25,6 +25,11 @@ on:
         required: false
         type: string
         default: '[{"arch":"amd64"},{"arch":"arm64"}]'
+      build-args:
+        description: 'Optional and extra newline-separated build args, appended to the standard GIT_COMMIT/VERSION/BUILD_DATE set.'
+        required: false
+        type: string
+        default: ''
     outputs:
       image:
         value: ${{ jobs.merge.outputs.image }}
@@ -136,6 +141,7 @@ jobs:
             GIT_COMMIT=${{ github.sha }}
             VERSION=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.version'] }}
             BUILD_DATE=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}
+            ${{ inputs.build-args }}
           labels: |
             ${{ steps.meta.outputs.labels }}
             onebrief.created=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}

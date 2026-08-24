@@ -72,6 +72,7 @@ RUN set -eu; \
 
 FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:${PYTHON_VERSION}-dev AS build
 ARG TARGETARCH
+ARG ACCEL=auto
 ENV UV_COMPILE_BYTECODE=0 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=0
 
 WORKDIR /app
@@ -89,11 +90,11 @@ RUN /usr/bin/python -m uv venv /app/.venv
 # stage above), and pin cryptography + pillow to CVE-patched versions. rapidocr stays in as our
 # OCR engine: ONNX-based, no cysignals, FIPS-safe.
 #
-# Arch split: amd64 uses CUDA (cu128 torch group + onnxruntime-gpu); arm64 is
-# CPU-only because onnxruntime-gpu publishes no aarch64 wheels and the realistic
-# arm64 deploy targets (Graviton/Ampere) have no NVIDIA GPUs anyway.
+# Arch split (ACCEL=auto): amd64 uses CUDA (cu128 torch group + onnxruntime-gpu);
+# arm64 is CPU-only because onnxruntime-gpu publishes no aarch64 wheels and the
+# realistic arm64 deploy targets (Graviton/Ampere) have no NVIDIA GPUs anyway.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    if [ "$TARGETARCH" = "arm64" ]; then \
+    if [ "$ACCEL" = "cpu" ] || [ "$TARGETARCH" = "arm64" ]; then \
         TORCH_GROUP=cpu; ORT_PKG=onnxruntime; \
     else \
         TORCH_GROUP=cu128; ORT_PKG=onnxruntime-gpu; \
