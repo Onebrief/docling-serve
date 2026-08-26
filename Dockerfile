@@ -84,7 +84,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     && /usr/bin/python -m uv sync --frozen --python /app/.venv/bin/python --group "$TORCH_GROUP" --no-group dev --no-group pypi --no-install-project \
     && /usr/bin/python -m uv pip uninstall --python /app/.venv/bin/python opencv-python opencv-python-headless \
     && /usr/bin/python -m uv pip install --python /app/.venv/bin/python /tmp/opencv_python_headless-*.whl \
-    && /usr/bin/python -m uv pip install --python /app/.venv/bin/python "${ORT_PKG}>=1.19.0" \
+    && /usr/bin/python -m uv pip install --python /app/.venv/bin/python "${ORT_PKG}>=1.19.0,<1.29" \
     && /usr/bin/python -m uv pip install --python /app/.venv/bin/python "cryptography>=50.0.0" "pillow>=12.3.0" "setuptools>=83.0.0"
 
 # Copy project source and install the docling_serve package itself (cheap vs. the deps layer above)
@@ -172,10 +172,21 @@ ENV \
 
 USER nonroot
 
+# Drop empty placeholder dirs left over from the venv-split COPYs above (they
+# are pre-created in the build stage so COPY --from doesn't fail on packages
+# that aren't installed for this arch). An empty site-packages/triton imports
+# as a bare namespace package, which torch>=2.13 dynamo mistakes for a real
+# triton install and crashes on `triton.language` at app startup — arm64/CPU
+# builds don't ship triton, so this removes exactly those stubs.
+RUN ["/app/.venv/bin/python", "-c", "import os, sys; sp='/app/.venv/lib/python%d.%d/site-packages' % sys.version_info[:2]; [os.rmdir(os.path.join(sp, d)) for d in ('triton', 'nvidia/cudnn', 'nvidia/cublas', 'nvidia', 'torch') if os.path.isdir(os.path.join(sp, d)) and not os.listdir(os.path.join(sp, d))]"]
+
 # Smoke test: fail the build if the app can't be imported/assembled in the final
 # runtime image. Catches import-time crashes (missing/renamed distributions like
 # docling vs docling-slim, bad merge resolutions, missing runtime .so libs) before
 # the image is ever pushed or deployed. Runs as nonroot to mirror runtime.
-RUN ["/app/.venv/bin/python", "-c", "import docling_serve.app; from docling_serve.app import create_app; create_app()"]
+# torch._dynamo regression-checks the empty-triton crash above; onnxruntime
+# import runs natively per-arch on the build runner and catches import-time
+# segfaults like onnxruntime 1.29.0's on linux/arm64.
+RUN ["/app/.venv/bin/python", "-c", "import torch._dynamo; import onnxruntime; import docling_serve.app; from docling_serve.app import create_app; create_app()"]
 
 ENTRYPOINT ["docling-serve", "run"]
