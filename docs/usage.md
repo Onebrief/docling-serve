@@ -11,8 +11,8 @@ On top of the source of file (see below), both endpoints support the same parame
 
 | Field Name | Type | Description |
 |------------|------|-------------|
-| `from_formats` | List[InputFormat] | Input format(s) to convert from. String or list of strings. Allowed values: `docx`, `pptx`, `html`, `image`, `pdf`, `asciidoc`, `md`, `csv`, `xlsx`, `odt`, `ods`, `odp`, `xml_uspto`, `xml_jats`, `xml_xbrl`, `xml_doclang`, `mets_gbs`, `json_docling`, `audio`, `vtt`, `latex`, `email`, `epub`. Optional, defaults to all formats. |
-| `to_formats` | List[OutputFormat] | Output format(s) to convert to. String or list of strings. Allowed values: `md`, `json`, `yaml`, `html`, `html_split_page`, `text`, `doctags`, `vtt`, `doclang`. Optional, defaults to Markdown. |
+| `from_formats` | List[InputFormat] | Input format(s) to convert from. String or list of strings. Allowed values: `docx`, `doc`, `pptx`, `ppt`, `html`, `image`, `pdf`, `asciidoc`, `md`, `csv`, `xlsx`, `xls`, `odt`, `ods`, `odp`, `xml_uspto`, `xml_jats`, `xml_xbrl`, `xml_doclang`, `dclx`, `mets_gbs`, `json_docling`, `audio`, `video`, `vtt`, `latex`, `email`, `epub`, `boxnote`, `iwork_pages`, `ebcdic`. Optional, defaults to all formats. |
+| `to_formats` | List[OutputFormat] | Output format(s) to convert to. String or list of strings. Allowed values: `md`, `json`, `yaml`, `html`, `html_split_page`, `text`, `doctags`, `vtt`, `doclang`, `dclx`, `chunks`. Optional, defaults to Markdown. |
 | `image_export_mode` | ImageRefMode | Image export mode for the document (in case of JSON, Markdown or HTML). Allowed values: `placeholder`, `embedded`, `referenced`. Optional, defaults to Placeholder. |
 | `do_ocr` | bool | If enabled, the bitmap content will be processed using OCR. Boolean. Optional, defaults to true |
 | `force_ocr` | bool | If enabled, replace existing text with OCR-generated text over content. Boolean. Optional, defaults to false. |
@@ -28,10 +28,14 @@ On top of the source of file (see below), both endpoints support the same parame
 | `document_timeout` | float or NoneType | The timeout for processing each document, in seconds. |
 | `abort_on_error` | bool | Abort on error if enabled. Boolean. Optional, defaults to false. |
 | `do_table_structure` | bool | If enabled, the table structure will be extracted. Boolean. Optional, defaults to true. |
+| `do_pdf_heading_hierarchy` | bool | If enabled, section-header levels are inferred for PDF and image inputs processed by the standard pipeline, from the PDF bookmarks / table of contents, from outline numbering and from font style. When disabled, every detected heading stays at level 1 and the document hierarchy is flat. Boolean. Optional, defaults to false. |
+| `pdf_heading_hierarchy_options` | HeadingHierarchyOptions | Fine-tuning of the section-header level inference, applied when do_pdf_heading_hierarchy is enabled. The nested enabled flag is set automatically from do_pdf_heading_hierarchy and does not need to be provided. |
 | `include_images` | bool | If enabled, picture element images are generated and included in the output. Boolean. Optional, defaults to true. |
 | `include_page_images` | bool | If enabled, full-page images are generated and included in the output. Boolean. Optional, defaults to false. |
 | `images_scale` | float | Scale factor for images. Float. Optional, defaults to 2.0. |
 | `md_page_break_placeholder` | str | Add this placeholder between pages in the markdown output. |
+| `chunking_options` | HybridChunkerOptions or HierarchicalChunkerOptions or NoneType | Chunker configuration. |
+| `chunking_preset` | str or NoneType | Preset ID for chunking (e.g. "granite_embedding_278m"). Mutually exclusive with chunking_options. |
 | `do_code_enrichment` | bool | If enabled, perform OCR code enrichment. Boolean. Optional, defaults to false. |
 | `do_formula_enrichment` | bool | If enabled, perform formula OCR, return LaTeX code. Boolean. Optional, defaults to false. |
 | `do_picture_classification` | bool | If enabled, classify pictures in documents. Boolean. Optional, defaults to false. |
@@ -81,8 +85,9 @@ On top of the source of file (see below), both endpoints support the same parame
 | `api_overrides` | Dict[VlmEngineType, ApiModelConfig] | API-specific configuration overrides |
 | `trust_remote_code` | bool | Whether to trust remote code for this model |
 | `stop_strings` | List[str] | Stop strings for generation |
+| `temperature` | float | Sampling temperature for generation |
 | `max_new_tokens` | int | Maximum number of new tokens to generate |
-| `temperature` | float | Sampling temperature for generation. 0.0 uses greedy decoding. |
+| `extra_generation_config` | Dict[str, Any] | Additional generation configuration |
 
 <h4>BaseVlmEngineOptions</h4>
 
@@ -168,11 +173,85 @@ On top of the source of file (see below), both endpoints support the same parame
 | `classification_deny` | List[PictureClassificationLabel] or NoneType | Do not describe pictures whose predicted class is in this deny-list. |
 | `classification_min_confidence` | float | Minimum classification confidence required before a picture can be described. |
 
+<h4>HierarchicalChunkerOptions</h4>
+
+| Field Name | Type | Description |
+|------------|------|-------------|
+| `chunker` | Literal | No description provided. |
+| `use_markdown_tables` | bool | Use markdown table format instead of triplets for table serialization. |
+| `use_markdown_images` | bool | Enable image serialization and image references inside chunks. Also adds a `has_image` field to chunk metadata to make image-containing chunks easier to identify. |
+| `image_placeholder` | str | Placeholder text used inside chunks to reference an image when markdown image serialization is disabled. |
+| `include_raw_text` | bool | Include both raw_text and text (contextualized) in response. If False, only text is included. |
+
+<h4>HybridChunkerOptions</h4>
+
+| Field Name | Type | Description |
+|------------|------|-------------|
+| `chunker` | Literal | No description provided. |
+| `use_markdown_tables` | bool | Use markdown table format instead of triplets for table serialization. |
+| `use_markdown_images` | bool | Enable image serialization and image references inside chunks. Also adds a `has_image` field to chunk metadata to make image-containing chunks easier to identify. |
+| `image_placeholder` | str | Placeholder text used inside chunks to reference an image when markdown image serialization is disabled. |
+| `include_raw_text` | bool | Include both raw_text and text (contextualized) in response. If False, only text is included. |
+| `max_tokens` | int or NoneType | Maximum number of tokens per chunk. When left to none, the value is automatically extracted from the tokenizer. |
+| `tokenizer` | str | HuggingFace model name for custom tokenization. If not specified, uses 'sentence-transformers/all-MiniLM-L6-v2' as default. |
+| `merge_peers` | bool | Merge undersized successive chunks with same headings. |
+
+<h4>HeadingHierarchyOptions</h4>
+
+| Field Name | Type | Description |
+|------------|------|-------------|
+| `enabled` | bool | Enable inference of section-header levels for the PDF/image pipeline. When disabled (default), all detected headings remain at level 1 (unchanged behavior). |
+| `use_bookmarks` | bool | Use the PDF bookmarks / table-of-contents (when present) as the authoritative heading signal. Bookmarks are fuzzily matched to detected headings by title and page; confident matches win over numbering and style, and a confidently matched list-item is promoted to a heading. Unmatched entries fall back to numbering/style. |
+| `use_numbering` | bool | Use legal/outline numbering (e.g. PART I -> 1. -> 1.1 -> (a) -> (i), Roman vs Arabic numerals) as the primary signal for headings without a bookmark match. |
+| `use_style` | bool | Use the visual style of the heading (font size, and with `use_font_style` also weight, slant and letter case) as a fallback for headings without recognizable numbering. Requires `generate_parsed_pages=True`. |
+| `use_font_style` | bool | Refine the style fallback with the font weight and slant read from the embedded PDF font names, plus all-caps detection, so that headings sharing a font size are still ranked (bold above regular, upright above italic, all-caps above mixed case). Ignored when `use_style` is disabled; font names that carry no recognizable styling fall back to font size alone. |
+| `style_size_tolerance` | float | Relative difference below which two heading font sizes are treated as one size by the style fallback. The size of a heading is measured from its cells, so the same font measures a little taller on a heading that has descenders; without this tolerance such headings would land on different levels. Higher = more sizes collapse into one level. |
+| `numbering_schemes` | List[str] or NoneType | Optional override of the numbering-scheme precedence (highest level first). Known schemes: 'part', 'chapter', 'article', 'roman_u', 'arabic', 'alpha_u', 'alpha_l', 'roman_l'. When None, a default legal/regulatory ordering is used. |
+| `max_level` | int | Maximum heading level to assign. Deeper levels are clamped. |
+| `bookmark_match_threshold` | float | Minimum normalized title-similarity (0..1) for a bookmark to be considered a match to a detected heading/list-item. Below this, the bookmark is ignored and the heading falls back to numbering/style. Higher = stricter. |
+
 <!-- end: parameters-docs -->
 
 ### Authentication
 
 When authentication is activated (see the parameter `DOCLING_SERVE_API_KEY` in [configuration.md](./configuration.md)), all the API requests **must** provide the header `X-Api-Key` with the correct secret key.
+
+### Batch connector plugins
+
+`DoclingServiceClient.submit_batch()` accepts mappings for connector source and
+artifact-target kinds that the installed SDK does not know:
+
+```python
+job = client.submit_batch(
+    sources=[
+        {
+            "kind": "filenet",
+            "base_url": "https://filenet.example.com/graphql",
+            "username": "user",
+            "api_key": "secret",
+            "repository_id": "OS1",
+            "folder_id": "/incoming",
+        }
+    ],
+    target={
+        "kind": "plugin_artifact_store",
+        "bucket": "converted",
+        "prefix": "results/",
+        "api_key": "secret",
+    },
+)
+```
+
+The SDK's generic models only preserve and serialize these mappings. The running
+server validates them against the concrete connector models installed in that
+deployment. Configure both `DOCLING_SERVE_ALLOWED_SOURCE_TYPES` and
+`DOCLING_SERVE_ALLOWED_TARGET_TYPES`; third-party connectors also require
+`DOCLING_SERVE_ALLOW_EXTERNAL_PLUGINS=true`.
+
+Install the same connector package versions in every API and Local, RQ, or Ray
+worker process, and keep their Docling, Jobkit, and Serve versions aligned. The
+running deployment's `/openapi.json` lists its enabled concrete connector
+schemas. Plugin installation or policy changes appear there only after restart.
 
 ## Convert endpoints
 
@@ -386,6 +465,75 @@ files = {
 
 response = await async_client.post(url, files=files, data=parameters)
 assert response.status_code == 200, "Response should be 200 OK"
+
+data = response.json()
+```
+
+</details>
+
+#### Callbacks
+
+Both `/v1/convert/file` and `/v1/convert/file/async` accept an optional `callbacks` field.
+Repeat the field once per endpoint you want notified when the conversion completes.
+
+Each value is either a **bare URL** (shortcut) or a **JSON-encoded `CallbackSpec` object** with optional headers and a CA certificate:
+
+| Format | Example value |
+|--------|---------------|
+| Bare URL | `https://hook.example.com/done` |
+| JSON object | `{"url":"https://hook.example.com/done","headers":{"Authorization":"Bearer tok"},"ca_cert":""}` |
+
+The bare-URL format is the easiest way to register a webhook. Use the JSON-object format when you need custom request headers (e.g. an auth token) or a non-default CA certificate for TLS verification.
+
+<details>
+<summary>CURL example — bare URL callback:</summary>
+
+```sh
+curl -X 'POST' \
+  'http://127.0.0.1:5001/v1/convert/file' \
+  -H 'accept: application/json' \
+  -H 'Content-Type: multipart/form-data' \
+  -F 'files=@document.pdf;type=application/pdf' \
+  -F 'callbacks=https://hook.example.com/done'
+```
+
+</details>
+
+<details>
+<summary>CURL example — multiple callbacks, one with custom headers:</summary>
+
+```sh
+curl -X 'POST' \
+  'http://127.0.0.1:5001/v1/convert/file' \
+  -H 'accept: application/json' \
+  -H 'Content-Type: multipart/form-data' \
+  -F 'files=@document.pdf;type=application/pdf' \
+  -F 'callbacks=https://hook.example.com/done' \
+  -F 'callbacks={"url":"https://secure.example.com/notify","headers":{"Authorization":"Bearer my-token"}}'
+```
+
+</details>
+
+<details>
+<summary>Python example — callbacks with httpx:</summary>
+
+```python
+import httpx
+
+async_client = httpx.AsyncClient(timeout=60.0)
+url = "http://localhost:5001/v1/convert/file"
+
+with open("document.pdf", "rb") as f:
+    response = await async_client.post(
+        url,
+        files={"files": ("document.pdf", f, "application/pdf")},
+        data={
+            "callbacks": [
+                "https://hook.example.com/done",
+                '{"url":"https://secure.example.com/notify","headers":{"Authorization":"Bearer my-token"}}',
+            ]
+        },
+    )
 
 data = response.json()
 ```

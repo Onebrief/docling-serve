@@ -188,6 +188,7 @@ class DoclingServeSettings(BaseSettings):
     eng_rq_sub_channel: str = "docling:updates"
     eng_rq_results_ttl: int = 3_600 * 4  # 4 hours default
     eng_rq_failure_ttl: int = 3_600 * 4  # 4 hours default
+    eng_rq_job_timeout: int = 3_600 * 4  # 4 hours default; -1 disables it
     eng_rq_redis_max_connections: int = 50
     eng_rq_redis_socket_timeout: Optional[float] = None  # Socket timeout in seconds
     eng_rq_redis_socket_connect_timeout: Optional[float] = (
@@ -371,7 +372,13 @@ class DoclingServeSettings(BaseSettings):
     custom_ocr_presets: dict[str, Any] = Field(default_factory=dict)
     allowed_ocr_kinds: Optional[list[str]] = None
 
-    # Target Control
+    # Chunking Control
+    default_chunking_preset: str = "granite_embedding_278m"
+    allowed_chunking_presets: Optional[list[str]] = None
+    custom_chunking_presets: dict[str, Any] = Field(default_factory=dict)
+
+    # Source / Target Control
+    allowed_source_types: Optional[list[str]] = None
     allowed_target_types: Optional[list[str]] = None
 
     @classmethod
@@ -403,6 +410,7 @@ class DoclingServeSettings(BaseSettings):
         "custom_table_structure_presets",
         "custom_layout_presets",
         "custom_ocr_presets",
+        "custom_chunking_presets",
         mode="before",
     )
     @classmethod
@@ -436,6 +444,8 @@ class DoclingServeSettings(BaseSettings):
         "allowed_layout_presets",
         "allowed_ocr_presets",
         "allowed_ocr_kinds",
+        "allowed_chunking_presets",
+        "allowed_source_types",
         "allowed_target_types",
         "allowed_image_export_modes",
         mode="before",

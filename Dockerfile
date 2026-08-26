@@ -93,6 +93,18 @@ COPY ./README.md ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     /usr/bin/python -m uv pip install --python /app/.venv/bin/python --no-deps -e .
 
+# Since docling-slim 2.121, RapidOcrModel.download_models imports rapidocr,
+# which imports cv2 at module import time — so the models download below needs
+# the image-codec runtime libs our FIPS-rebuilt cv2 links against. They ship in
+# the opencv-builder stage (apk dev packages) but not in this plain -dev base;
+# copy them in, mirroring the release-stage COPYs further down.
+COPY --from=opencv-builder /usr/lib/libjpeg.so.8* /usr/lib/
+COPY --from=opencv-builder /usr/lib/libpng16.so.16* /usr/lib/
+COPY --from=opencv-builder /usr/lib/libwebp.so.7* /usr/lib/
+COPY --from=opencv-builder /usr/lib/libwebpdemux.so.2* /usr/lib/
+COPY --from=opencv-builder /usr/lib/libwebpmux.so.3* /usr/lib/
+COPY --from=opencv-builder /usr/lib/libsharpyuv.so.0* /usr/lib/
+
 # Download models in build stage (has shell available)
 ARG MODELS_LIST="layout tableformer rapidocr"
 ENV DOCLING_SERVE_ARTIFACTS_PATH=/app/.cache/docling/models

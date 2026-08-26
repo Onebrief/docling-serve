@@ -68,6 +68,10 @@ def _build_cm_config():
         custom_ocr_presets=docling_serve_settings.custom_ocr_presets,
         allowed_ocr_kinds=docling_serve_settings.allowed_ocr_kinds,
         allow_custom_ocr_config=docling_serve_settings.allow_custom_ocr_config,
+        # Chunking Control
+        default_chunking_preset=docling_serve_settings.default_chunking_preset,
+        allowed_chunking_presets=docling_serve_settings.allowed_chunking_presets,
+        custom_chunking_presets=docling_serve_settings.custom_chunking_presets,
     )
 
 
@@ -97,6 +101,40 @@ def _build_s3_presigned_config():
     )
 
 
+def _build_rq_config():
+    from docling_jobkit.orchestrators.rq.orchestrator import RQOrchestratorConfig
+
+    return RQOrchestratorConfig(
+        redis_url=docling_serve_settings.eng_rq_redis_url,
+        queue_name=docling_serve_settings.eng_rq_queue_name,
+        results_prefix=docling_serve_settings.eng_rq_results_prefix,
+        sub_channel=docling_serve_settings.eng_rq_sub_channel,
+        scratch_dir=get_scratch(),
+        debug_error_details=docling_serve_settings.debug_error_details,
+        results_ttl=docling_serve_settings.eng_rq_results_ttl,
+        failure_ttl=docling_serve_settings.eng_rq_failure_ttl,
+        job_timeout=docling_serve_settings.eng_rq_job_timeout,
+        redis_max_connections=docling_serve_settings.eng_rq_redis_max_connections,
+        redis_socket_timeout=docling_serve_settings.eng_rq_redis_socket_timeout,
+        redis_socket_connect_timeout=(
+            docling_serve_settings.eng_rq_redis_socket_connect_timeout
+        ),
+        redis_gate_concurrency=docling_serve_settings.eng_rq_redis_gate_concurrency,
+        redis_gate_reserved_connections=(
+            docling_serve_settings.eng_rq_redis_gate_reserved_connections
+        ),
+        redis_gate_wait_timeout=docling_serve_settings.eng_rq_redis_gate_wait_timeout,
+        redis_gate_status_poll_wait_timeout=(
+            docling_serve_settings.eng_rq_redis_gate_status_poll_wait_timeout
+        ),
+        zombie_reaper_interval=docling_serve_settings.eng_rq_zombie_reaper_interval,
+        zombie_reaper_max_age=docling_serve_settings.eng_rq_zombie_reaper_max_age,
+        result_removal_delay=docling_serve_settings.result_removal_delay,
+        s3_presigned_config=_build_s3_presigned_config(),
+        allow_external_plugins=docling_serve_settings.allow_external_plugins,
+    )
+
+
 @lru_cache
 def get_async_orchestrator() -> BaseOrchestrator:
     if docling_serve_settings.eng_kind == AsyncEngine.LOCAL:
@@ -119,36 +157,11 @@ def get_async_orchestrator() -> BaseOrchestrator:
         return LocalOrchestrator(config=local_config, converter_manager=cm)
 
     elif docling_serve_settings.eng_kind == AsyncEngine.RQ:
-        from docling_jobkit.orchestrators.rq.orchestrator import (
-            RQOrchestrator,
-            RQOrchestratorConfig,
-        )
+        from docling_jobkit.orchestrators.rq.orchestrator import RQOrchestrator
 
         from docling_serve.rq_instrumentation import wrap_rq_queue_for_tracing
 
-        rq_config = RQOrchestratorConfig(
-            redis_url=docling_serve_settings.eng_rq_redis_url,
-            queue_name=docling_serve_settings.eng_rq_queue_name,
-            results_prefix=docling_serve_settings.eng_rq_results_prefix,
-            sub_channel=docling_serve_settings.eng_rq_sub_channel,
-            scratch_dir=get_scratch(),
-            debug_error_details=docling_serve_settings.debug_error_details,
-            results_ttl=docling_serve_settings.eng_rq_results_ttl,
-            failure_ttl=docling_serve_settings.eng_rq_failure_ttl,
-            redis_max_connections=docling_serve_settings.eng_rq_redis_max_connections,
-            redis_socket_timeout=docling_serve_settings.eng_rq_redis_socket_timeout,
-            redis_socket_connect_timeout=docling_serve_settings.eng_rq_redis_socket_connect_timeout,
-            redis_gate_concurrency=docling_serve_settings.eng_rq_redis_gate_concurrency,
-            redis_gate_reserved_connections=docling_serve_settings.eng_rq_redis_gate_reserved_connections,
-            redis_gate_wait_timeout=docling_serve_settings.eng_rq_redis_gate_wait_timeout,
-            redis_gate_status_poll_wait_timeout=docling_serve_settings.eng_rq_redis_gate_status_poll_wait_timeout,
-            zombie_reaper_interval=docling_serve_settings.eng_rq_zombie_reaper_interval,
-            zombie_reaper_max_age=docling_serve_settings.eng_rq_zombie_reaper_max_age,
-            result_removal_delay=docling_serve_settings.result_removal_delay,
-            s3_presigned_config=_build_s3_presigned_config(),
-        )
-
-        orchestrator = RQOrchestrator(config=rq_config)
+        orchestrator = RQOrchestrator(config=_build_rq_config())
         if docling_serve_settings.otel_enable_traces:
             wrap_rq_queue_for_tracing(orchestrator._rq_queue)
             orchestrator._rq_job_function = (

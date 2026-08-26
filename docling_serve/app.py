@@ -10,7 +10,7 @@ import time
 from collections import Counter
 from contextlib import asynccontextmanager
 from io import BytesIO
-from typing import Annotated, Optional
+from typing import Annotated, Any, Optional
 
 from botocore.exceptions import ClientError
 
@@ -29,6 +29,7 @@ from fastapi import (
     WebSocketDisconnect,
     status,
 )
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import (
     get_redoc_html,
@@ -57,9 +58,7 @@ from docling.datamodel.service.options import (
 from docling.datamodel.service.requests import (
     BatchConvertSourcesRequest,
     ConvertSourcesRequest,
-    FileSourceRequest,
     GenericChunkDocumentsRequest,
-    S3SourceRequest,
     TargetName,
     TargetRequest,
     make_request_model,
@@ -90,6 +89,10 @@ from docling.datamodel.service.targets import (
     ZipTarget,
 )
 from docling.datamodel.service.tasks import TaskType
+from docling_jobkit.connectors.errors import (
+    SourceConnectorConfigError,
+    TargetConnectorConfigError,
+)
 from docling_jobkit.datamodel.chunking import ChunkingExportOptions
 from docling_jobkit.datamodel.stored_outcome import (
     StoredFailureOutcome,
@@ -105,7 +108,12 @@ from docling_jobkit.orchestrators.base_orchestrator import (
 from docling_jobkit.orchestrators.rq.orchestrator import RQOrchestrator
 
 from docling_serve.auth import APIKeyAuth, AuthenticationResult
-from docling_serve.helper_functions import DOCLING_VERSIONS, FormDepends, create_upload_file
+from docling_serve.helper_functions import (
+    DOCLING_VERSIONS,
+    FormDepends,
+    create_upload_file,
+    parse_callback_item,
+)
 from docling_serve.logging_config import setup_logging
 from docling_serve.orchestrator_factory import get_async_orchestrator
 from docling_serve.otel_instrumentation import (
@@ -113,6 +121,7 @@ from docling_serve.otel_instrumentation import (
     setup_otel_instrumentation,
 )
 from docling_serve.policy import (
+    build_batch_request_model,
     build_service_policy,
     normalize_convert_options,
     normalize_request,
@@ -278,6 +287,7 @@ def create_app():  # noqa: C901
         __base__=ConvertSourcesRequest,
         target=(TargetRequest, default_target),
     )
+    BatchConvertSourcesRequestModel = build_batch_request_model(service_policy)
 
     app = FastAPI(
         title="Docling Serve",
@@ -296,6 +306,24 @@ def create_app():  # noqa: C901
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             content={"detail": "Server is busy, please try again shortly."},
             headers={"Retry-After": "1"},
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def request_validation_error_handler(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        del request
+        errors = [
+            {
+                key: value
+                for key, value in error.items()
+                if key in {"loc", "msg", "type"}
+            }
+            for error in exc.errors()
+        ]
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            content={"detail": errors},
         )
 
     if docling_serve_settings.eng_kind == AsyncEngine.RAY:
@@ -446,7 +474,7 @@ def create_app():  # noqa: C901
     # Async / Sync helpers #
     ########################
 
-    async def _enque_source(
+    async def _enqueue_source(
         orchestrator: BaseOrchestrator,
         request: (
             BatchConvertSourcesRequest
@@ -455,14 +483,40 @@ def create_app():  # noqa: C901
         ),
         tenant_id: str | None = None,
     ) -> Task:
-        sources: list[TaskSource] = []
-        for s in request.sources:
-            if isinstance(s, FileSourceRequest):
-                sources.append(FileSource.model_validate(s))
-            elif isinstance(s, HttpSource):
-                sources.append(HttpSource.model_validate(s))
-            elif isinstance(s, S3SourceRequest):
-                sources.append(S3Coordinates.model_validate(s))
+        sources: list[TaskSource]
+        enqueue_targets: list[Any]
+        try:
+            # Normalize every source to its concrete, kind-bearing registry model so
+            # it survives the internal Task resolver the orchestrator runs at enqueue.
+            # Non-batch file/http requests are registered connectors too, so they take
+            # the same path — stripping them to kind-less FileSource/HttpSource here
+            # would make that resolver reject them. InBody/Zip targets are left as-is
+            # (the Task resolver handles those); only batch normalizes its storage
+            # target through the registry.
+            sources = [
+                service_policy.source_factory.validate_config(source)
+                for source in request.sources
+            ]
+            if isinstance(request, BatchConvertSourcesRequest):
+                # Resolve effective targets: `targets` list takes precedence over the
+                # singular `target` convenience field.
+                raw_targets = request.targets or (
+                    [request.target] if request.target is not None else []
+                )
+                enqueue_targets = [
+                    service_policy.target_factory.validate_config(t)
+                    for t in raw_targets
+                ]
+            else:
+                assert request.target is not None, (
+                    "target must be set before enqueueing"
+                )
+                enqueue_targets = [request.target]
+        except (SourceConnectorConfigError, TargetConnectorConfigError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=str(exc),
+            ) from exc
 
         convert_options: ConvertDocumentsRequestOptions
         chunking_options: BaseChunkerOptions | None = None
@@ -498,7 +552,7 @@ def create_app():  # noqa: C901
             convert_options=convert_options,
             chunking_options=chunking_options,
             chunking_export_options=chunking_export_options,
-            target=request.target,
+            targets=enqueue_targets,
             callbacks=request.callbacks,
             metadata=task_metadata,
         )
@@ -509,7 +563,7 @@ def create_app():  # noqa: C901
 
         return task
 
-    async def _enque_file(
+    async def _enqueue_file(
         orchestrator: BaseOrchestrator,
         files: list[UploadFile],
         task_type: TaskType,
@@ -521,7 +575,7 @@ def create_app():  # noqa: C901
         tenant_id: str | None = None,
     ) -> Task:
         _log.info(
-            f"[TENANT_ID] _enque_file called with tenant_id='{tenant_id}', "
+            f"[TENANT_ID] _enqueue_file called with tenant_id='{tenant_id}', "
             f"processing {len(files)} files"
         )
 
@@ -553,7 +607,7 @@ def create_app():  # noqa: C901
             convert_options=convert_options,
             chunking_options=chunking_options,
             chunking_export_options=chunking_export_options,
-            target=target,
+            targets=[target],
             callbacks=callbacks or [],
             metadata=metadata,
         )
@@ -706,6 +760,8 @@ def create_app():  # noqa: C901
     def downgrade_openapi31_to_30(spec):
         def strip_unsupported(obj):
             if isinstance(obj, dict):
+                if "const" in obj and "enum" not in obj:
+                    obj = {**obj, "enum": [obj["const"]]}
                 obj = {
                     k: strip_unsupported(v)
                     for k, v in obj.items()
@@ -860,7 +916,7 @@ def create_app():  # noqa: C901
         prepared_request = _prepare_convert_request(conversion_request)
         tenant_id = _get_tenant_id_from_header(x_tenant_id)
         _log.info(f"[TENANT_ID] process_url endpoint received tenant_id='{tenant_id}'")
-        task = await _enque_source(
+        task = await _enqueue_source(
             orchestrator=orchestrator, request=prepared_request, tenant_id=tenant_id
         )
         completed = await _wait_task_complete(
@@ -910,6 +966,17 @@ def create_app():  # noqa: C901
             ConvertDocumentsRequestOptions, FormDepends(ConvertDocumentsRequestOptions)
         ],
         target_type: Annotated[TargetName, Form()] = default_target_name,
+        callbacks_raw: Annotated[
+            list[str],
+            Form(
+                alias="callbacks",
+                description=(
+                    "Callback endpoint(s). Repeat the field for multiple callbacks. "
+                    "Each value is either a bare URL (e.g. https://hook.example.com/done) "
+                    'or a JSON-encoded CallbackSpec object (e.g. {"url":"https://…","headers":{"X-Token":"abc"}}).'
+                ),
+            ),
+        ] = [],
         x_tenant_id: Annotated[
             str | None, Header(alias=docling_serve_settings.eng_ray_tenant_id_header)
         ] = None,
@@ -920,7 +987,8 @@ def create_app():  # noqa: C901
         tenant_id = _get_tenant_id_from_header(x_tenant_id)
         _log.info(f"[TENANT_ID] process_file endpoint received tenant_id='{tenant_id}'")
         target = _resolve_file_target(target_type)
-        task = await _enque_file(
+        callbacks = [parse_callback_item(v) for v in callbacks_raw]
+        task = await _enqueue_file(
             task_type=TaskType.CONVERT,
             orchestrator=orchestrator,
             files=files,
@@ -928,7 +996,7 @@ def create_app():  # noqa: C901
             chunking_options=None,
             chunking_export_options=None,
             target=target,
-            callbacks=[],
+            callbacks=callbacks,
             tenant_id=tenant_id,
         )
         completed = await _wait_task_complete(
@@ -975,7 +1043,7 @@ def create_app():  # noqa: C901
         _log.info(
             f"[TENANT_ID] process_url_async endpoint received tenant_id='{tenant_id}'"
         )
-        task = await _enque_source(
+        task = await _enqueue_source(
             orchestrator=orchestrator, request=prepared_request, tenant_id=tenant_id
         )
         task_queue_position = await orchestrator.get_queue_position(
@@ -999,7 +1067,7 @@ def create_app():  # noqa: C901
     async def process_source_batch(
         auth: Annotated[AuthenticationResult, Depends(require_auth)],
         orchestrator: Annotated[BaseOrchestrator, Depends(get_async_orchestrator)],
-        conversion_request: BatchConvertSourcesRequest,
+        conversion_request: BatchConvertSourcesRequestModel,
         x_tenant_id: Annotated[
             str | None, Header(alias=docling_serve_settings.eng_ray_tenant_id_header)
         ] = None,
@@ -1009,7 +1077,7 @@ def create_app():  # noqa: C901
         _log.info(
             f"[TENANT_ID] process_source_batch endpoint received tenant_id='{tenant_id}'"
         )
-        task = await _enque_source(
+        task = await _enqueue_source(
             orchestrator=orchestrator,
             request=conversion_request,
             tenant_id=tenant_id,
@@ -1042,6 +1110,17 @@ def create_app():  # noqa: C901
             ConvertDocumentsRequestOptions, FormDepends(ConvertDocumentsRequestOptions)
         ],
         target_type: Annotated[TargetName, Form()] = default_target_name,
+        callbacks_raw: Annotated[
+            list[str],
+            Form(
+                alias="callbacks",
+                description=(
+                    "Callback endpoint(s). Repeat the field for multiple callbacks. "
+                    "Each value is either a bare URL (e.g. https://hook.example.com/done) "
+                    'or a JSON-encoded CallbackSpec object (e.g. {"url":"https://…","headers":{"X-Token":"abc"}}).'
+                ),
+            ),
+        ] = [],
         x_tenant_id: Annotated[
             str | None, Header(alias=docling_serve_settings.eng_ray_tenant_id_header)
         ] = None,
@@ -1054,7 +1133,8 @@ def create_app():  # noqa: C901
             f"[TENANT_ID] process_file_async endpoint received tenant_id='{tenant_id}'"
         )
         target = _resolve_file_target(target_type)
-        task = await _enque_file(
+        callbacks = [parse_callback_item(v) for v in callbacks_raw]
+        task = await _enqueue_file(
             task_type=TaskType.CONVERT,
             orchestrator=orchestrator,
             files=files,
@@ -1062,7 +1142,7 @@ def create_app():  # noqa: C901
             chunking_options=None,
             chunking_export_options=None,
             target=target,
-            callbacks=[],
+            callbacks=callbacks,
             tenant_id=tenant_id,
         )
         task_queue_position = await orchestrator.get_queue_position(
@@ -1106,7 +1186,7 @@ def create_app():  # noqa: C901
             _log.info(
                 f"[TENANT_ID] chunk_source_async ({path_name}) endpoint received tenant_id='{tenant_id}'"
             )
-            task = await _enque_source(
+            task = await _enqueue_source(
                 orchestrator=orchestrator, request=request, tenant_id=tenant_id
             )
             task_queue_position = await orchestrator.get_queue_position(
@@ -1178,7 +1258,7 @@ def create_app():  # noqa: C901
                 f"[TENANT_ID] chunk_file_async ({path_name}) endpoint received tenant_id='{tenant_id}'"
             )
             target = InBodyTarget() if target_type == TargetName.INBODY else ZipTarget()
-            task = await _enque_file(
+            task = await _enqueue_file(
                 task_type=TaskType.CHUNK,
                 orchestrator=orchestrator,
                 files=files,
@@ -1231,7 +1311,7 @@ def create_app():  # noqa: C901
             _log.info(
                 f"[TENANT_ID] chunk_source ({path_name}) endpoint received tenant_id='{tenant_id}'"
             )
-            task = await _enque_source(
+            task = await _enqueue_source(
                 orchestrator=orchestrator, request=request, tenant_id=tenant_id
             )
             completed = await _wait_task_complete(
@@ -1320,7 +1400,7 @@ def create_app():  # noqa: C901
                 f"[TENANT_ID] chunk_file ({path_name}) endpoint received tenant_id='{tenant_id}'"
             )
             target = InBodyTarget() if target_type == TargetName.INBODY else ZipTarget()
-            task = await _enque_file(
+            task = await _enqueue_file(
                 task_type=TaskType.CHUNK,
                 orchestrator=orchestrator,
                 files=files,
