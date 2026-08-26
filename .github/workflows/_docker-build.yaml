@@ -41,6 +41,9 @@ on:
       pinned-version:
         value: ${{ jobs.merge.outputs.pinned-version }}
 
+permissions:
+  contents: read
+
 jobs:
   build:
     name: Build ${{ matrix.arch }} (${{ inputs.image-name }})
