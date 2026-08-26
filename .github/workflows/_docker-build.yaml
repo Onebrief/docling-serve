@@ -21,10 +21,14 @@ on:
         type: boolean
         default: true
       platforms:
-        description: 'Platform matrix as JSON. Default builds both amd64 and arm64.'
+        description: >-
+          Platform matrix as JSON. Each entry may set "pool" to pick the
+          runs-on runner pool; entries without one default to
+          stepsecurity-x64. Builds run natively on the entry's arch — there
+          is no emulation fallback, so arm64 entries must use an arm64 pool.
         required: false
         type: string
-        default: '[{"arch":"amd64"},{"arch":"arm64"}]'
+        default: '[{"arch":"amd64"},{"arch":"arm64","pool":"large-arm64"}]'
     outputs:
       image:
         value: ${{ jobs.merge.outputs.image }}
@@ -50,15 +54,9 @@ jobs:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(inputs.platforms) }}
-    env:
-      ENDPOINTS: >-
-        {
-          "amd64": "acacab27f41b14a139365db6c39e4fa0-f0b3e773ef03bf17.elb.us-east-1.amazonaws.com",
-          "arm64": "a3b4f3eb07b8644e89058b7b4b673bcf-41d24dca9dd63827.elb.us-east-1.amazonaws.com"
-        }
     outputs:
       digestsid: ${{ steps.setout.outputs.digestsid }}
-    runs-on: runs-on=${{ github.run_id }}-build-${{ matrix.arch }}/pool=stepsecurity-x64
+    runs-on: runs-on=${{ github.run_id }}-build-${{ matrix.arch }}/pool=${{ matrix.pool || 'stepsecurity-x64' }}
     steps:
       - uses: runs-on/action@cd2b598b0515d39d78c38a02d529db87d2196d1e #v2
 
@@ -77,21 +75,7 @@ jobs:
           username: ${{ vars.NEXUS_USER }}
           password: ${{ secrets.NEXUS_PASS }}
 
-      - name: Check buildkit
-        id: buildkit
-        env:
-          ENDPOINT: tcp://${{ fromJson(env.ENDPOINTS)[matrix.arch] }}:1234
-        run: |
-          docker buildx create --name remote --driver remote "$ENDPOINT" >/dev/null 2>&1 || true
-          if docker buildx inspect --bootstrap remote >/dev/null 2>&1; then
-            echo "up=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "up=false" >> "$GITHUB_OUTPUT"
-            docker buildx rm remote >/dev/null 2>&1 || true
-          fi
-
       - name: Mount docker layer cache volume
-        if: steps.buildkit.outputs.up != 'true'
         uses: runs-on/snapshot@d3bcc424e9b751601b1ff830243cd72ad21c44ba # v1.1.1
         with:
           path: /var/lib/docker
@@ -99,14 +83,12 @@ jobs:
           version: docker
 
       - name: Set up local buildx
-        if: steps.buildkit.outputs.up != 'true'
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
         with:
           name: local-runner
           keep-state: true
 
       - name: Clear old cache items
-        if: steps.buildkit.outputs.up != 'true'
         run: |
           docker buildx prune -af --filter "until=48h" --min-free-space=10gb
 
@@ -121,7 +103,7 @@ jobs:
         id: build
         uses: docker/build-push-action@14487ce63c7a62a4a324b0bfb37086795e31c6c1 #v6.16.0
         with:
-          builder: ${{ steps.buildkit.outputs.up == 'true' && 'remote' || 'local-runner' }}
+          builder: local-runner
           push: true
           platforms: linux/${{ matrix.arch }}
           file: ${{ inputs.dockerfile }}
