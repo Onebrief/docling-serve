@@ -20,7 +20,7 @@
 # like Zscaler will break the TLS handshake locally.)
 ARG PYTHON_MAJOR=3
 ARG PYTHON_MINOR=13
-ARG PYTHON_PATCH=14
+ARG PYTHON_PATCH=15
 ARG PYTHON_VERSION=${PYTHON_MAJOR}.${PYTHON_MINOR}.${PYTHON_PATCH}
 FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:${PYTHON_VERSION}-dev AS opencv-builder
 USER 0
@@ -69,8 +69,8 @@ RUN /usr/bin/python -m uv venv /app/.venv
 
 # Install dependencies using lockfile for pinned versions (deps only — source not yet present).
 # We swap the PyPI opencv-python-headless wheel for our FIPS-clean rebuild (see opencv-builder
-# stage above), and pin cryptography + pillow to CVE-patched versions. rapidocr stays in as our
-# OCR engine: ONNX-based, no cysignals, FIPS-safe.
+# stage above), and pin cryptography + pillow + setuptools to CVE-patched versions. rapidocr
+# stays in as our OCR engine: ONNX-based, no cysignals, FIPS-safe.
 #
 # Arch split: amd64 uses CUDA (cu128 torch group + onnxruntime-gpu); arm64 is
 # CPU-only because onnxruntime-gpu publishes no aarch64 wheels and the realistic
@@ -85,7 +85,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     && /usr/bin/python -m uv pip uninstall --python /app/.venv/bin/python opencv-python opencv-python-headless \
     && /usr/bin/python -m uv pip install --python /app/.venv/bin/python /tmp/opencv_python_headless-*.whl \
     && /usr/bin/python -m uv pip install --python /app/.venv/bin/python "${ORT_PKG}>=1.19.0" \
-    && /usr/bin/python -m uv pip install --python /app/.venv/bin/python "cryptography>=46.0.5" "pillow>=12.1.1"
+    && /usr/bin/python -m uv pip install --python /app/.venv/bin/python "cryptography>=50.0.0" "pillow>=12.3.0" "setuptools>=83.0.0"
 
 # Copy project source and install the docling_serve package itself (cheap vs. the deps layer above)
 COPY ./docling_serve ./docling_serve
