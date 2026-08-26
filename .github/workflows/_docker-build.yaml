@@ -79,7 +79,7 @@ jobs:
         uses: runs-on/snapshot@d3bcc424e9b751601b1ff830243cd72ad21c44ba # v1.1.1
         with:
           path: /var/lib/docker
-          volume_size: 60
+          volume_size: 120
           version: docker
 
       - name: Set up local buildx
@@ -90,7 +90,7 @@ jobs:
 
       - name: Clear old cache items
         run: |
-          docker buildx prune -af --filter "until=48h" --min-free-space=10gb
+          docker buildx prune -af --filter "until=48h" --min-free-space=40gb
 
       - name: Docker Metadata
         id: meta
