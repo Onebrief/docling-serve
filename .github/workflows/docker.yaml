@@ -15,11 +15,15 @@ jobs:
   build:
     name: Build
     permissions:
+      actions: read
       contents: read
+      checks: write
       id-token: write
-    uses: Onebrief/actions/.github/workflows/reusable-docker-build.yml@1a92562b1135e279bccb31afb7ad4ddbf8c27775 # main
+      security-events: write
+    uses: ./.github/workflows/_docker-build.yaml
     with:
-      repository: ob/docling-ob
+      image-name: ob/docling-ob
       dockerfile: Dockerfile
       context: .
+      provenance: false
     secrets: inherit
