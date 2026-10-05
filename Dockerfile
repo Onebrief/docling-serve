@@ -20,7 +20,7 @@
 # like Zscaler will break the TLS handshake locally.)
 ARG PYTHON_MAJOR=3
 ARG PYTHON_MINOR=13
-ARG PYTHON_PATCH=15
+ARG PYTHON_PATCH=16
 ARG PYTHON_VERSION=${PYTHON_MAJOR}.${PYTHON_MINOR}.${PYTHON_PATCH}
 FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:${PYTHON_VERSION}-dev AS opencv-builder
 USER 0
