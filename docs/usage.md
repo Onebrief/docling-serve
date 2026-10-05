@@ -11,16 +11,16 @@ On top of the source of file (see below), both endpoints support the same parame
 
 | Field Name | Type | Description |
 |------------|------|-------------|
-| `from_formats` | List[InputFormat] | Input format(s) to convert from. String or list of strings. Allowed values: `docx`, `doc`, `pptx`, `ppt`, `html`, `image`, `pdf`, `asciidoc`, `md`, `csv`, `xlsx`, `xls`, `odt`, `ods`, `odp`, `xml_uspto`, `xml_jats`, `xml_xbrl`, `xml_doclang`, `dclx`, `mets_gbs`, `json_docling`, `audio`, `video`, `vtt`, `latex`, `email`, `epub`, `boxnote`, `iwork_pages`, `ebcdic`. Optional, defaults to all formats. |
-| `to_formats` | List[OutputFormat] | Output format(s) to convert to. String or list of strings. Allowed values: `md`, `json`, `yaml`, `html`, `html_split_page`, `text`, `doctags`, `vtt`, `doclang`, `dclx`, `chunks`. Optional, defaults to Markdown. |
+| `from_formats` | List[InputFormat] | Input format(s) to convert from. String or list of strings. Allowed values: `docx`, `doc`, `rtf`, `pptx`, `ppt`, `html`, `mhtml`, `image`, `pdf`, `asciidoc`, `md`, `csv`, `xlsx`, `xls`, `odt`, `ods`, `odp`, `xml_uspto`, `xml_jats`, `xml_xbrl`, `xml_doclang`, `dclx`, `mets_gbs`, `json_docling`, `audio`, `video`, `vtt`, `latex`, `email`, `epub`, `boxnote`, `iwork_pages`, `iwork_keynote`, `ebcdic`, `afp`. Optional, defaults to all formats. |
+| `to_formats` | List[OutputFormat] | Output format(s) to convert to. String or list of strings. Allowed values: `md`, `json`, `yaml`, `html`, `html_split_page`, `text`, `doctags`, `vtt`, `doclang`, `dclx`, `chunks`, `latex`. Optional, defaults to Markdown. |
 | `image_export_mode` | ImageRefMode | Image export mode for the document (in case of JSON, Markdown or HTML). Allowed values: `placeholder`, `embedded`, `referenced`. Optional, defaults to Placeholder. |
 | `do_ocr` | bool | If enabled, the bitmap content will be processed using OCR. Boolean. Optional, defaults to true |
 | `force_ocr` | bool | If enabled, replace existing text with OCR-generated text over content. Boolean. Optional, defaults to false. |
 | `ocr_engine` | str | DEPRECATED: Use ocr_preset instead. The OCR engine to use. String.  |
-| `ocr_lang` | List[str] or NoneType | List of languages used by the OCR engine. Note that each OCR engine has different values for the language names. String or list of strings. Optional, defaults to empty. |
+| `ocr_lang` | List[str] or NoneType | OCR languages as BCP-47 tags (e.g. `en`, `de-DE`, `zh-Hant`), in order of preference. The service canonicalizes them to a language-script pair, so `deu`, `ger` and `de-DE` are all German. The reserved tag `mul` must be used alone. Optional; the selected engine's default applies when omitted or empty. |
 | `ocr_preset` | str | Preset ID for OCR engine. |
 | `ocr_custom_config` | Dict[str, Any] or NoneType | Custom configuration for OCR engine. Use this to specify engine-specific options beyond `ocr_lang`. Each OCR engine kind has its own configuration schema. |
-| `pdf_backend` | PdfBackend | The PDF backend to use. String. Allowed values: `pypdfium2`, `docling_parse`, `threaded_docling_parse`, `dlparse_v1`, `dlparse_v2`, `dlparse_v4`. Optional, defaults to `docling_parse`. |
+| `pdf_backend` | PdfBackend | The PDF backend to use. String. Allowed values: `pypdfium2`, `docling_parse`, `_docling_parse`, `dlparse_v1`, `dlparse_v2`, `dlparse_v4`. Optional, defaults to `docling_parse`. |
 | `table_mode` | TableFormerMode | Mode to use for table structure, String. Allowed values: `fast`, `accurate`. Optional, defaults to accurate. |
 | `table_cell_matching` | bool | If true, matches table cells predictions back to PDF cells. Can break table output if PDF cells are merged across table columns. If false, let table structure model define the text cells, ignore PDF cells. |
 | `pipeline` | ProcessingPipeline | Choose the pipeline to process PDF or image files. |
@@ -34,12 +34,15 @@ On top of the source of file (see below), both endpoints support the same parame
 | `include_page_images` | bool | If enabled, full-page images are generated and included in the output. Boolean. Optional, defaults to false. |
 | `images_scale` | float | Scale factor for images. Float. Optional, defaults to 2.0. |
 | `md_page_break_placeholder` | str | Add this placeholder between pages in the markdown output. |
+| `md_compact_tables` | bool | Whether to use compact table format without column padding in the markdown output. When False (default), tables use padded columns for better visual formatting. When True, tables use minimal whitespace, which is better for large tables and downstream processing. |
 | `chunking_options` | HybridChunkerOptions or HierarchicalChunkerOptions or NoneType | Chunker configuration. |
 | `chunking_preset` | str or NoneType | Preset ID for chunking (e.g. "granite_embedding_278m"). Mutually exclusive with chunking_options. |
 | `do_code_enrichment` | bool | If enabled, perform OCR code enrichment. Boolean. Optional, defaults to false. |
 | `do_formula_enrichment` | bool | If enabled, perform formula OCR, return LaTeX code. Boolean. Optional, defaults to false. |
 | `do_picture_classification` | bool | If enabled, classify pictures in documents. Boolean. Optional, defaults to false. |
 | `do_chart_extraction` | bool | If enabled, extract numeric data from charts. Boolean. Optional, defaults to false. |
+| `chart_extraction_preset` | str or NoneType | Preset ID for chart extraction. Use "default" for the admin-controlled default, or a specific preset such as "granite_vision_v4" or "granite_vision". |
+| `chart_extraction_custom_config` | ChartExtractionVlmEngineOptions or dict or NoneType | Custom chart extraction configuration including model spec and engine options. Only available if the admin allows it. Accepts a ChartExtractionVlmEngineOptions object or an equivalent dict with '`model_spec`', '`engine_options`', and optional output flags (chart2csv, chart2summary, chart2code). |
 | `do_picture_description` | bool | If enabled, describe pictures in documents. Boolean. Optional, defaults to false. |
 | `picture_description_area_threshold` | float | Minimum percentage of the area for a picture to be processed with the models. |
 | `picture_description_local` | PictureDescriptionLocal or NoneType | DEPRECATED: Options for running a local vision-language model in the picture description. The parameters refer to a model hosted on Hugging Face. This parameter is mutually exclusive with `picture_description_api`. Please migrate to `picture_description_preset` or `picture_description_custom_config`. |
@@ -251,7 +254,17 @@ deployment. Configure both `DOCLING_SERVE_ALLOWED_SOURCE_TYPES` and
 Install the same connector package versions in every API and Local, RQ, or Ray
 worker process, and keep their Docling, Jobkit, and Serve versions aligned. The
 running deployment's `/openapi.json` lists its enabled concrete connector
-schemas. Plugin installation or policy changes appear there only after restart.
+schemas (unless `DOCLING_SERVE_ENABLE_API_DOCS=false`). Plugin installation or policy changes appear there only after restart.
+
+### Deployment capabilities
+
+`GET /v1/capabilities` describes what the running deployment accepts, so clients can offer only valid choices:
+
+- `stages`: for each model stage (OCR, layout, table structure, VLM pipeline, picture description and classification, code/formula, chart extraction, chunking), the request option that selects the preset, the allowed presets with their name and description, the preset `default` resolves to, and whether a custom config is allowed (`custom_config_option`).
+- `sources`, `targets` (with the default target), `output_formats` and `image_export_modes`.
+- `limits` (for example `max_file_size` and `max_images_scale`) and `features` (for example whether an API key is required and whether artifact storage is enabled).
+
+The endpoint needs no API key. Custom presets are listed by id only, never with their configuration. Disable it with `DOCLING_SERVE_ENABLE_CAPABILITIES_ENDPOINT=false`.
 
 ## Convert endpoints
 
