@@ -81,20 +81,21 @@ RUN /usr/bin/python -m uv venv /app/.venv
 # only carries libcublasLt.so.12 / libcudnn.so.9 from the nvidia-*-cu12 wheels.
 # Since ORT 1.27 the default PyPI onnxruntime-gpu wheel is built for CUDA 13 and
 # its CUDA provider fails to dlopen (libcublasLt.so.13 missing), so RapidOCR
-# silently falls back to CPU. The onnxruntime-cuda-12 index publishes the same
-# releases built against CUDA 12 (AI-1777). uv searches --extra-index-url before
-# the default index, so the cu12 wheel wins over PyPI's cu13 one.
+# silently falls back to CPU (AI-1777). 1.26.x is the last PyPI release built
+# against CUDA 12. ORT also publishes cu12 builds of newer releases on its
+# onnxruntime-cuda-12 index (aiinfra.pkgs.visualstudio.com), but DNS for that
+# host fails intermittently on the CI build runners (2 of 3 builds), so we stay
+# on PyPI. Revisit if the index is ever proxied through Nexus.
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "$TARGETARCH" = "arm64" ]; then \
-        TORCH_GROUP=cpu; ORT_SPEC="onnxruntime>=1.19.0,<1.29"; ORT_INDEX_ARGS=""; \
+        TORCH_GROUP=cpu; ORT_SPEC="onnxruntime>=1.19.0,<1.29"; \
     else \
-        TORCH_GROUP=cu128; ORT_SPEC="onnxruntime-gpu==1.28.0"; \
-        ORT_INDEX_ARGS="--extra-index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/"; \
+        TORCH_GROUP=cu128; ORT_SPEC="onnxruntime-gpu>=1.26.0,<1.27"; \
     fi \
     && /usr/bin/python -m uv sync --frozen --python /app/.venv/bin/python --group "$TORCH_GROUP" --no-group dev --no-group pypi --no-install-project \
     && /usr/bin/python -m uv pip uninstall --python /app/.venv/bin/python opencv-python opencv-python-headless \
     && /usr/bin/python -m uv pip install --python /app/.venv/bin/python /tmp/opencv_python_headless-*.whl \
-    && /usr/bin/python -m uv pip install --python /app/.venv/bin/python ${ORT_INDEX_ARGS} "${ORT_SPEC}" \
+    && /usr/bin/python -m uv pip install --python /app/.venv/bin/python "${ORT_SPEC}" \
     && /usr/bin/python -m uv pip install --python /app/.venv/bin/python "cryptography>=50.0.0" "pillow>=12.3.0" "setuptools>=83.0.0"
 
 # Copy project source and install the docling_serve package itself (cheap vs. the deps layer above)
