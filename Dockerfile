@@ -75,16 +75,27 @@ RUN /usr/bin/python -m uv venv /app/.venv
 # Arch split: amd64 uses CUDA (cu128 torch group + onnxruntime-gpu); arm64 is
 # CPU-only because onnxruntime-gpu publishes no aarch64 wheels and the realistic
 # arm64 deploy targets (Graviton/Ampere) have no NVIDIA GPUs anyway.
+#
+# onnxruntime-gpu must be a CUDA 12 build: the amd64 torch track is cu128 (the
+# cu128 index tops out at torch 2.11, which we keep for T4/sm_75), so the venv
+# only carries libcublasLt.so.12 / libcudnn.so.9 from the nvidia-*-cu12 wheels.
+# Since ORT 1.27 the default PyPI onnxruntime-gpu wheel is built for CUDA 13 and
+# its CUDA provider fails to dlopen (libcublasLt.so.13 missing), so RapidOCR
+# silently falls back to CPU (AI-1777). 1.26.x is the last PyPI release built
+# against CUDA 12. ORT also publishes cu12 builds of newer releases on its
+# onnxruntime-cuda-12 index (aiinfra.pkgs.visualstudio.com), but DNS for that
+# host fails intermittently on the CI build runners (2 of 3 builds), so we stay
+# on PyPI. Revisit if the index is ever proxied through Nexus.
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "$TARGETARCH" = "arm64" ]; then \
-        TORCH_GROUP=cpu; ORT_PKG=onnxruntime; \
+        TORCH_GROUP=cpu; ORT_SPEC="onnxruntime>=1.19.0,<1.29"; \
     else \
-        TORCH_GROUP=cu128; ORT_PKG=onnxruntime-gpu; \
+        TORCH_GROUP=cu128; ORT_SPEC="onnxruntime-gpu>=1.26.0,<1.27"; \
     fi \
     && /usr/bin/python -m uv sync --frozen --python /app/.venv/bin/python --group "$TORCH_GROUP" --no-group dev --no-group pypi --no-install-project \
     && /usr/bin/python -m uv pip uninstall --python /app/.venv/bin/python opencv-python opencv-python-headless \
     && /usr/bin/python -m uv pip install --python /app/.venv/bin/python /tmp/opencv_python_headless-*.whl \
-    && /usr/bin/python -m uv pip install --python /app/.venv/bin/python "${ORT_PKG}>=1.19.0,<1.29" \
+    && /usr/bin/python -m uv pip install --python /app/.venv/bin/python "${ORT_SPEC}" \
     && /usr/bin/python -m uv pip install --python /app/.venv/bin/python "cryptography>=50.0.0" "pillow>=12.3.0" "setuptools>=83.0.0"
 
 # Copy project source and install the docling_serve package itself (cheap vs. the deps layer above)
@@ -186,7 +197,13 @@ RUN ["/app/.venv/bin/python", "-c", "import os, sys; sp='/app/.venv/lib/python%d
 # the image is ever pushed or deployed. Runs as nonroot to mirror runtime.
 # torch._dynamo regression-checks the empty-triton crash above; onnxruntime
 # import runs natively per-arch on the build runner and catches import-time
-# segfaults like onnxruntime 1.29.0's on linux/arm64.
-RUN ["/app/.venv/bin/python", "-c", "import torch._dynamo; import onnxruntime; import docling_serve.app; from docling_serve.app import create_app; create_app()"]
+# segfaults like onnxruntime 1.29.0's on linux/arm64. On amd64 we also check
+# that ORT's CUDA provider library was built against the same CUDA major as the
+# cuBLAS the venv ships (nvidia-cublas-cu12 from torch cu128): a CUDA-13 wheel
+# needs libcublasLt.so.13, fails to dlopen at runtime and silently degrades
+# RapidOCR to CPU (AI-1777). We compare sonames rather than dlopen because the
+# provider also links libcuda.so.1 (NVIDIA driver), which the GPU-less build
+# runner does not have.
+RUN ["/app/.venv/bin/python", "-c", "import torch._dynamo; import onnxruntime, glob, os, platform, re\nimport docling_serve.app; from docling_serve.app import create_app; create_app()\ncapi = os.path.join(os.path.dirname(onnxruntime.__file__), 'capi')\nneed = set(m.decode() for m in re.findall(rb'libcublasLt\\.so\\.(\\d+)', open(os.path.join(capi, 'libonnxruntime_providers_cuda.so'), 'rb').read())) if platform.machine() == 'x86_64' else set()\nhave = set(p.rsplit('.', 1)[1] for p in glob.glob(os.path.join(capi, '..', '..', 'nvidia', 'cublas', 'lib', 'libcublasLt.so.*')))\nassert not need or need & have, f'onnxruntime CUDA provider needs libcublasLt majors {sorted(need)} but venv ships {sorted(have)}'"]
 
 ENTRYPOINT ["docling-serve", "run"]
