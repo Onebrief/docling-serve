@@ -1,6 +1,6 @@
 [project]
 name = "docling-serve"
-version = "1.31.0"  # DO NOT EDIT, updated automatically
+version = "1.36.0"  # DO NOT EDIT, updated automatically
 description = "Running Docling as a service"
 license = {text = "MIT"}
 authors = [
@@ -33,10 +33,10 @@ classifiers = [
 ]
 requires-python = ">=3.10"
 dependencies = [
-    "docling-slim[standard,service-client,models-remote,format-opendocument]>=2.118.0,<3.0.0",
+    "docling-slim[standard,service-client,models-remote,format-opendocument]>=2.129.0,<3.0.0",
     "docling-core>=2.79.0",
-    "docling-jobkit[rq]>=3.4.0,<4",
-    "fastapi[standard]<0.137.0",
+    "docling-jobkit[rq]>=3.8.0,<4",
+    "fastapi[standard]>=0.138.0,<1.0.0",
     "httpx~=0.28",
     "pydantic~=2.10",
     "pydantic-settings~=2.4",
@@ -55,9 +55,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-ui = [
-    "gradio>=6.0.0,<7.0.0",
-]
+# Kept for backwards compatibility: the web UI is now bundled in the package.
+ui = []
 tesserocr = [
     "tesserocr~=2.7"
 ]
@@ -89,8 +88,8 @@ dev = [
 ]
 
 constraints  = [
-  'transformers>=4.42.0,<5.9.0,!=5.0.*,!=5.1.*,!=5.2.*,!=5.3.* ; sys_platform == "darwin"',
-  'transformers>=5.9.0,<6.0.0,!=5.0.*,!=5.1.*,!=5.2.*,!=5.3.* ; sys_platform != "darwin"',
+  # 'transformers>=4.42.0,<5.9.0,!=5.0.*,!=5.1.*,!=5.2.*,!=5.3.* ; sys_platform == "darwin"',
+  # 'transformers>=5.9.0,<6.0.0,!=5.0.*,!=5.1.*,!=5.2.*,!=5.3.* ; sys_platform != "darwin"',
 ]
 
 pypi = [
@@ -164,6 +163,7 @@ override-dependencies = [
   "xgrammar>=0.1.24",
   "grpcio>=1.75.1",
   "cryptography>=46.0.7",
+  #"transformers>=5.9.0,<=5.14.1",
 ]
 
 [tool.uv.sources]
@@ -200,6 +200,7 @@ triton-rocm = [
 # docling-slim = { git = "https://github.com/docling-project/docling/", rev = "main" }
 # docling-jobkit = { git = "https://github.com/docling-project/docling-jobkit/", branch = "main" }
 # docling-jobkit = { path = "../docling-jobkit", editable = true }
+
 
 [[tool.uv.index]]
 name = "pytorch-pypi"
@@ -244,6 +245,10 @@ explicit = true
 [tool.setuptools.packages.find]
 include = ["docling_serve*"]
 namespaces = true
+
+[tool.setuptools.package-data]
+# Web UI bundle, built from ui/ with `npm --prefix ui run build`.
+docling_serve = ["ui_static/**/*"]
 
 [project.scripts]
 docling-serve = "docling_serve.__main__:main"
@@ -340,14 +345,6 @@ module = [
     "msgpack.*",
 ]
 ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = [
-    "gradio",
-    "gradio.*",
-]
-ignore_missing_imports = true
-follow_imports = "skip"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
