@@ -96,7 +96,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     && /usr/bin/python -m uv pip uninstall --python /app/.venv/bin/python opencv-python opencv-python-headless \
     && /usr/bin/python -m uv pip install --python /app/.venv/bin/python /tmp/opencv_python_headless-*.whl \
     && /usr/bin/python -m uv pip install --python /app/.venv/bin/python "${ORT_SPEC}" \
-    && /usr/bin/python -m uv pip install --python /app/.venv/bin/python "cryptography>=50.0.0" "pillow>=12.3.0" "setuptools>=83.0.0"
+    && /usr/bin/python -m uv pip install --python /app/.venv/bin/python "cryptography>=50.0.0" "pillow>=13.0.0" "setuptools>=83.0.0"
 
 # Copy project source and install the docling_serve package itself (cheap vs. the deps layer above)
 COPY ./docling_serve ./docling_serve
