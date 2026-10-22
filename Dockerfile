@@ -26,10 +26,10 @@ ARG PYTHON_VERSION=${PYTHON_MAJOR}.${PYTHON_MINOR}.${PYTHON_PATCH}
 # re-pushes them with rebuilt packages every few days) and BuildKit keys every
 # layer on the resolved base digest, so a moved tag invalidates the whole cache
 # including the ~40 min opencv compile below. With the digest pinned, the
-# layer cache only invalidates when we bump it deliberately. Bump both together:
-#   docker buildx imagetools inspect nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:<ver>-dev
-#   docker buildx imagetools inspect nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:<ver>
-# (the "Digest:" line is the multi-arch index digest; it covers amd64 and arm64).
+# layer cache only invalidates when we bump it deliberately. Do not edit these
+# by hand: `scripts/bump_base_image.sh <ver>` updates the version and both
+# digests together (and `--check` tells you if they are stale). The digests are
+# the multi-arch index digests, so one pin covers amd64 and arm64.
 ARG PYTHON_DEV_DIGEST=sha256:6dea4fb091515b32a5fd5cbaff991393a797eb0196520aea1dbf15f71c28480e
 ARG PYTHON_RUNTIME_DIGEST=sha256:29f8c6f064f81fb321e326afc2be0c8f39963c292030bcbccc37f5df29d3b8d5
 FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:${PYTHON_VERSION}-dev@${PYTHON_DEV_DIGEST} AS opencv-builder
