@@ -22,7 +22,17 @@ ARG PYTHON_MAJOR=3
 ARG PYTHON_MINOR=13
 ARG PYTHON_PATCH=16
 ARG PYTHON_VERSION=${PYTHON_MAJOR}.${PYTHON_MINOR}.${PYTHON_PATCH}
-FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:${PYTHON_VERSION}-dev AS opencv-builder
+# Pin the base images by digest. The python-fips tags are mutable (Chainguard
+# re-pushes them with rebuilt packages every few days) and BuildKit keys every
+# layer on the resolved base digest, so a moved tag invalidates the whole cache
+# including the ~40 min opencv compile below. With the digest pinned, the
+# layer cache only invalidates when we bump it deliberately. Bump both together:
+#   docker buildx imagetools inspect nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:<ver>-dev
+#   docker buildx imagetools inspect nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:<ver>
+# (the "Digest:" line is the multi-arch index digest; it covers amd64 and arm64).
+ARG PYTHON_DEV_DIGEST=sha256:6dea4fb091515b32a5fd5cbaff991393a797eb0196520aea1dbf15f71c28480e
+ARG PYTHON_RUNTIME_DIGEST=sha256:29f8c6f064f81fb321e326afc2be0c8f39963c292030bcbccc37f5df29d3b8d5
+FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:${PYTHON_VERSION}-dev@${PYTHON_DEV_DIGEST} AS opencv-builder
 USER 0
 # Install the packages the cv2 compile link-checks against. Keep this line
 # stable — adding packages here invalidates the `pip wheel` layer below and
@@ -53,7 +63,7 @@ RUN pip wheel --no-binary opencv-python-headless \
         "opencv-python-headless==${OPENCV_HEADLESS_VERSION}" \
         -w /out
 
-FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:${PYTHON_VERSION}-dev AS build
+FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:${PYTHON_VERSION}-dev@${PYTHON_DEV_DIGEST} AS build
 ARG TARGETARCH
 ENV UV_COMPILE_BYTECODE=0 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=0
 
@@ -96,7 +106,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     && /usr/bin/python -m uv pip uninstall --python /app/.venv/bin/python opencv-python opencv-python-headless \
     && /usr/bin/python -m uv pip install --python /app/.venv/bin/python /tmp/opencv_python_headless-*.whl \
     && /usr/bin/python -m uv pip install --python /app/.venv/bin/python "${ORT_SPEC}" \
-    && /usr/bin/python -m uv pip install --python /app/.venv/bin/python "cryptography>=50.0.0" "pillow>=12.3.0" "setuptools>=83.0.0"
+    && /usr/bin/python -m uv pip install --python /app/.venv/bin/python "cryptography>=50.0.0" "pillow>=13.0.0" "setuptools>=83.0.0"
 
 # Copy project source and install the docling_serve package itself (cheap vs. the deps layer above)
 COPY ./docling_serve ./docling_serve
@@ -142,7 +152,7 @@ RUN SITE=/app/.venv/lib/python${PYTHON_MAJOR}.${PYTHON_MINOR}/site-packages && \
 
 # Multistage release build
 
-FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:${PYTHON_VERSION} AS release
+FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:${PYTHON_VERSION}@${PYTHON_RUNTIME_DIGEST} AS release
 
 WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 \
