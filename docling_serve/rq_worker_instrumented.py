@@ -19,6 +19,7 @@ from docling_serve.settings import docling_serve_settings
 from docling_serve.stuck_tasks import (
     StuckJobGuard,
     exit_stuck_worker,
+    install_debug_hang,
     rq_guard_deadline_seconds,
     task_data_document_timeout,
     task_data_source_names,
@@ -45,6 +46,7 @@ class InstrumentedRQWorker(CustomRQWorker):
             scratch_dir=scratch_dir,
             **kwargs,
         )
+        install_debug_hang(docling_serve_settings.debug_hang_sources_matching)
         self.tracer = trace.get_tracer(__name__)
         self.queue_wait_duration = metrics.get_meter(__name__).create_histogram(
             "docling.rq.queue.wait.duration",

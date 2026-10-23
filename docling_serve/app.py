@@ -138,7 +138,7 @@ from docling_serve.public_errors import build_public_http_detail
 from docling_serve.response_preparation import prepare_response
 from docling_serve.settings import AsyncEngine, docling_serve_settings
 from docling_serve.storage import get_scratch
-from docling_serve.stuck_tasks import stuck_task_watchdog
+from docling_serve.stuck_tasks import install_debug_hang, stuck_task_watchdog
 from docling_serve.websocket_notifier import WebsocketNotifier
 
 # Pre-import OCR backends that use cysignals (signal handlers must be registered
@@ -211,6 +211,7 @@ def _supervise_queue_processor(task: asyncio.Task, failed_event: asyncio.Event) 
 async def lifespan(app: FastAPI):
     scratch_dir = get_scratch()
 
+    install_debug_hang(docling_serve_settings.debug_hang_sources_matching)
     orchestrator = get_async_orchestrator()
     notifier = WebsocketNotifier(orchestrator)
     orchestrator.bind_notifier(notifier)

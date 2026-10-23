@@ -144,6 +144,48 @@ def task_data_source_names(task_data: Any) -> list[str]:
     return names
 
 
+def source_display_name(source: Any) -> str:
+    name = getattr(source, "name", None) or getattr(source, "filename", None)
+    return str(name) if name else str(source)
+
+
+def _block_forever() -> None:
+    threading.Event().wait()
+
+
+def install_debug_hang(pattern: str, hang: Callable[[], None] = _block_forever) -> bool:
+    if not pattern:
+        return False
+    from docling_jobkit.convert.manager import DoclingConverterManager
+
+    original = DoclingConverterManager.convert_documents
+    if getattr(original, "_docling_debug_hang_pattern", None) == pattern:
+        return True
+
+    def convert_documents(self: Any, *args: Any, **kwargs: Any) -> Any:
+        sources = kwargs.get("sources", args[0] if args else [])
+        names = [source_display_name(source) for source in sources or []]
+        if any(pattern in name for name in names):
+            _log.warning(
+                "DEBUG HANG: conversion of %s matches %r; blocking this worker "
+                "thread forever to simulate a wedged conversion",
+                names,
+                pattern,
+            )
+            hang()
+        return original(self, *args, **kwargs)
+
+    convert_documents._docling_debug_hang_pattern = pattern  # type: ignore[attr-defined]
+    DoclingConverterManager.convert_documents = convert_documents  # type: ignore[method-assign]
+    _log.warning(
+        "DEBUG HANG ENABLED: conversions whose source name contains %r will never "
+        "finish. This is a fault-injection switch for testing the stuck-task "
+        "watchdog and must not be set in a real deployment.",
+        pattern,
+    )
+    return True
+
+
 class StuckJobGuard:
     def __init__(self, deadline_seconds: float, on_timeout: Callable[[], None]):
         self._timer = threading.Timer(deadline_seconds, on_timeout)

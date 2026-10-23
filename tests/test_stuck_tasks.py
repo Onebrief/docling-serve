@@ -16,6 +16,7 @@ from docling_serve.stuck_tasks import (
     StuckJobGuard,
     abandon_stuck_tasks,
     find_stuck_tasks,
+    install_debug_hang,
     rq_guard_deadline_seconds,
     task_data_document_timeout,
     task_data_source_names,
@@ -169,6 +170,56 @@ class TestTaskDataHelpers:
         }
 
         assert task_data_source_names(task_data) == ["a.pdf", "http://x/b.pdf", "s3"]
+
+
+class TestInstallDebugHang:
+    @pytest.fixture
+    def manager_class(self, monkeypatch):
+        from docling_jobkit.convert.manager import DoclingConverterManager
+
+        monkeypatch.setattr(
+            DoclingConverterManager, "convert_documents", MagicMock(return_value="ok")
+        )
+        return DoclingConverterManager
+
+    def test_is_a_no_op_without_a_pattern(self, manager_class):
+        before = manager_class.convert_documents
+
+        assert install_debug_hang("") is False
+        assert manager_class.convert_documents is before
+
+    def test_hangs_only_conversions_whose_source_matches(self, manager_class):
+        original = manager_class.convert_documents
+        hung = []
+
+        def fake_hang():
+            hung.append(True)
+            raise RuntimeError("hung")
+
+        assert install_debug_hang("poison", hang=fake_hang) is True
+        manager = manager_class.__new__(manager_class)
+
+        clean = manager_class.convert_documents(
+            manager, sources=[SimpleNamespace(name="clean.pdf")], options=None
+        )
+        assert clean == "ok"
+        original.assert_called_once()
+        assert hung == []
+
+        with pytest.raises(RuntimeError, match="hung"):
+            manager_class.convert_documents(
+                manager,
+                sources=[SimpleNamespace(name="clean.pdf"), "http://x/poison-2.pdf"],
+            )
+        assert hung == [True]
+        original.assert_called_once()
+
+    def test_installs_once_per_pattern(self, manager_class):
+        install_debug_hang("poison")
+        wrapped = manager_class.convert_documents
+
+        assert install_debug_hang("poison") is True
+        assert manager_class.convert_documents is wrapped
 
 
 @pytest.fixture

@@ -190,6 +190,7 @@ class DoclingServeSettings(BaseSettings):
     stuck_task_grace: int = 300
     stuck_task_default_timeout: int = 0
     stuck_task_scan_interval: int = 30
+    debug_hang_sources_matching: str = ""
     # Local engine
     eng_loc_num_workers: int = 2
     eng_loc_share_models: bool = False
