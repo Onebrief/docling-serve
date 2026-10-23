@@ -187,6 +187,10 @@ class DoclingServeSettings(BaseSettings):
 
     eng_kind: AsyncEngine = AsyncEngine.LOCAL
     result_removal_delay: int = 300  # seconds until result is removed after fetch
+    stuck_task_grace: int = 300
+    stuck_task_default_timeout: int = 0
+    stuck_task_scan_interval: int = 30
+    debug_hang_sources_matching: str = ""
     # Local engine
     eng_loc_num_workers: int = 2
     eng_loc_share_models: bool = False
@@ -198,6 +202,7 @@ class DoclingServeSettings(BaseSettings):
     eng_rq_results_ttl: int = 3_600 * 4  # 4 hours default
     eng_rq_failure_ttl: int = 3_600 * 4  # 4 hours default
     eng_rq_job_timeout: int = 3_600 * 4  # 4 hours default; -1 disables it
+    eng_rq_stuck_job_exit_grace: int = 60
     eng_rq_redis_max_connections: int = 50
     eng_rq_redis_socket_timeout: Optional[float] = None  # Socket timeout in seconds
     eng_rq_redis_socket_connect_timeout: Optional[float] = (
