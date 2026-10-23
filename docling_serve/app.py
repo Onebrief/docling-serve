@@ -105,6 +105,7 @@ from docling_jobkit.orchestrators.base_orchestrator import (
     RedisBackpressureError,
     TaskNotFoundError,
 )
+from docling_jobkit.orchestrators.local.orchestrator import LocalOrchestrator
 from docling_jobkit.orchestrators.rq.orchestrator import RQOrchestrator
 
 from docling_serve.auth import APIKeyAuth, AuthenticationResult
@@ -137,6 +138,7 @@ from docling_serve.public_errors import build_public_http_detail
 from docling_serve.response_preparation import prepare_response
 from docling_serve.settings import AsyncEngine, docling_serve_settings
 from docling_serve.storage import get_scratch
+from docling_serve.stuck_tasks import stuck_task_watchdog
 from docling_serve.websocket_notifier import WebsocketNotifier
 
 # Pre-import OCR backends that use cysignals (signal handlers must be registered
@@ -179,6 +181,11 @@ _models_ready = asyncio.Event()
 # push delivery while polling still succeeds, which is otherwise very hard to
 # detect.
 _queue_processor_failed = asyncio.Event()
+
+_stuck_task_detected = asyncio.Event()
+STUCK_TASK_HEALTH_DETAIL = (
+    "A conversion exceeded its deadline; the pod is restarting to free the worker."
+)
 
 
 def _supervise_queue_processor(task: asyncio.Task, failed_event: asyncio.Event) -> None:
@@ -231,12 +238,26 @@ async def lifespan(app: FastAPI):
     if isinstance(orchestrator, RQOrchestrator):
         reaper_task = asyncio.create_task(orchestrator._reap_zombie_tasks())
 
+    watchdog_task = None
+    if isinstance(orchestrator, LocalOrchestrator):
+        watchdog_task = asyncio.create_task(
+            stuck_task_watchdog(
+                orchestrator,
+                _stuck_task_detected,
+                grace_seconds=docling_serve_settings.stuck_task_grace,
+                default_timeout_seconds=docling_serve_settings.stuck_task_default_timeout,
+                scan_interval_seconds=docling_serve_settings.stuck_task_scan_interval,
+            )
+        )
+
     yield
 
     # Cancel the background queue processor on shutdown
     queue_task.cancel()
     if reaper_task:
         reaper_task.cancel()
+    if watchdog_task:
+        watchdog_task.cancel()
     try:
         await queue_task
     except asyncio.CancelledError:
@@ -246,6 +267,11 @@ async def lifespan(app: FastAPI):
             await reaper_task
         except asyncio.CancelledError:
             _log.info("Zombie reaper cancelled.")
+    if watchdog_task:
+        try:
+            await watchdog_task
+        except asyncio.CancelledError:
+            _log.info("Stuck-task watchdog cancelled.")
 
     # Remove scratch directory in case it was a tempfile
     if docling_serve_settings.scratch_path is not None:
@@ -750,6 +776,11 @@ def create_app():  # noqa: C901
     def health() -> HealthCheckResponse:
         _log.info("Health check requested")
         _log.debug("Processing health check")
+        if _stuck_task_detected.is_set():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=STUCK_TASK_HEALTH_DETAIL,
+            )
         return HealthCheckResponse()
     
     @app.get("/ping")
@@ -799,6 +830,11 @@ def create_app():  # noqa: C901
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Background queue processor is not running.",
+            )
+        if _stuck_task_detected.is_set():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=STUCK_TASK_HEALTH_DETAIL,
             )
         return HealthCheckResponse()
 

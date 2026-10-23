@@ -1,6 +1,7 @@
 """Instrumented RQ worker with OpenTelemetry tracing support."""
 
 import logging
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -14,6 +15,14 @@ from docling_jobkit.orchestrators.rq.orchestrator import RQOrchestratorConfig
 from docling_jobkit.orchestrators.rq.worker import CustomRQWorker
 
 from docling_serve.rq_instrumentation import extract_trace_context
+from docling_serve.settings import docling_serve_settings
+from docling_serve.stuck_tasks import (
+    StuckJobGuard,
+    exit_stuck_worker,
+    rq_guard_deadline_seconds,
+    task_data_document_timeout,
+    task_data_source_names,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +69,52 @@ class InstrumentedRQWorker(CustomRQWorker):
         )
 
     def perform_job(self, job, queue):
+        guard = self._start_stuck_job_guard(job)
+        try:
+            return self._perform_traced_job(job, queue)
+        finally:
+            if guard is not None:
+                guard.cancel()
+
+    def _start_stuck_job_guard(self, job):
+        job_timeout = getattr(job, "timeout", None)
+        task_data = (
+            job.kwargs.get("task_data") if getattr(job, "kwargs", None) else None
+        )
+        deadline = rq_guard_deadline_seconds(
+            job_timeout if isinstance(job_timeout, (int, float)) else None,
+            task_data_document_timeout(task_data),
+            docling_serve_settings.eng_rq_stuck_job_exit_grace,
+        )
+        if deadline is None:
+            return None
+        started = time.monotonic()
+        task_id = task_data.get("task_id") if isinstance(task_data, dict) else None
+        sources = task_data_source_names(task_data)
+        heartbeat_prefix = getattr(
+            self.orchestrator_config, "heartbeat_key_prefix", None
+        )
+        heartbeat_key = f"{heartbeat_prefix}:{job.id}" if heartbeat_prefix else None
+        redis_url = getattr(self.orchestrator_config, "redis_url", None)
+        guard = StuckJobGuard(
+            deadline,
+            lambda: exit_stuck_worker(
+                job_id=job.id,
+                task_id=task_id,
+                sources=sources,
+                elapsed_seconds=time.monotonic() - started,
+                heartbeat_key=heartbeat_key,
+                redis_url=redis_url,
+            ),
+        )
+        guard.start()
+        logger.info(
+            f"Stuck-job guard armed for job {job.id}: the worker exits if the "
+            f"conversion is still running after {deadline:.0f}s"
+        )
+        return guard
+
+    def _perform_traced_job(self, job, queue):
         """
         Perform job with distributed tracing support.
 
