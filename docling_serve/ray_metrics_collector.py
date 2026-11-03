@@ -53,12 +53,17 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily
 from prometheus_client.registry import Collector
 
-from docling_jobkit.orchestrators.ray.models import TenantSnapshot
+if TYPE_CHECKING:
+    # Type-only: importing docling_jobkit.orchestrators.ray at runtime pulls in the
+    # Ray orchestrator and therefore `ray`, which this image does not install
+    # (docling-jobkit[rq] only). otel_instrumentation imports this module
+    # unconditionally, so a runtime import would break start-up without Ray.
+    from docling_jobkit.orchestrators.ray.models import TenantSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +98,7 @@ _MAX_AGE_INTERVALS = 5
 class CollectedData:
     """Everything one refresh gathers from Redis."""
 
-    tenants: list[TenantSnapshot]
+    tenants: list["TenantSnapshot"]
     num_tenants_with_any: int
 
 
