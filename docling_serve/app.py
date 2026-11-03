@@ -4,6 +4,7 @@ import hashlib
 import importlib.metadata
 import logging
 import os
+import re
 import shutil
 import time
 from collections import Counter
@@ -41,7 +42,11 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import create_model
 from scalar_fastapi import get_scalar_api_reference
 
-from docling.datamodel.base_models import DocumentStream, InputFormat
+from docling.datamodel.base_models import (
+    ConversionStatus,
+    DocumentStream,
+    InputFormat,
+)
 from docling.datamodel.service.callbacks import (
     CallbackSpec,
     ProgressCallbackRequest,
@@ -89,6 +94,7 @@ from docling.datamodel.service.targets import (
     ZipTarget,
 )
 from docling.datamodel.service.tasks import TaskType
+from docling_core.types.doc.common.constants import FIRST_SUPPORTED_MINOR
 from docling_jobkit.connectors.errors import (
     SourceConnectorConfigError,
     TargetConnectorConfigError,
@@ -408,6 +414,7 @@ def create_app():  # noqa: C901
         redis_url=redis_url,
         metrics_port=docling_serve_settings.metrics_port,
         ray_redis_manager=ray_redis_manager,
+        ray_metrics_refresh_interval=docling_serve_settings.eng_ray_tenant_metrics_refresh_interval,
     )
 
     # Add log context middleware to extract request headers
@@ -471,25 +478,28 @@ def create_app():  # noqa: C901
         )
 
     if offline_docs_assets and api_docs_enabled:
+        openapi_url = app.openapi_url
+        oauth2_redirect_url = app.swagger_ui_oauth2_redirect_url
+        assert openapi_url is not None and oauth2_redirect_url is not None
 
         @app.get("/swagger", include_in_schema=False)
         async def custom_swagger_ui_html():
             return get_swagger_ui_html(
-                openapi_url=app.openapi_url,
+                openapi_url=openapi_url,
                 title=app.title + " - Swagger UI",
-                oauth2_redirect_url=app.swagger_ui_oauth2_redirect_url,
+                oauth2_redirect_url=oauth2_redirect_url,
                 swagger_js_url="/static/swagger-ui-bundle.js",
                 swagger_css_url="/static/swagger-ui.css",
             )
 
-        @app.get(app.swagger_ui_oauth2_redirect_url, include_in_schema=False)
+        @app.get(oauth2_redirect_url, include_in_schema=False)
         async def swagger_ui_redirect():
             return get_swagger_ui_oauth2_redirect_html()
 
         @app.get("/docs", include_in_schema=False)
         async def redoc_html():
             return get_redoc_html(
-                openapi_url=app.openapi_url,
+                openapi_url=openapi_url,
                 title=app.title + " - ReDoc",
                 redoc_js_url="/static/redoc.standalone.js",
             )
@@ -517,6 +527,7 @@ def create_app():  # noqa: C901
             | GenericChunkDocumentsRequest
         ),
         tenant_id: str | None = None,
+        target_document_version: str | None = None,
     ) -> Task:
         sources: list[TaskSource]
         enqueue_targets: list[Any]
@@ -590,6 +601,7 @@ def create_app():  # noqa: C901
             targets=enqueue_targets,
             callbacks=request.callbacks,
             metadata=task_metadata,
+            target_document_version=target_document_version,
         )
 
         _log.info(
@@ -608,6 +620,7 @@ def create_app():  # noqa: C901
         target: TargetRequest,
         callbacks: list[CallbackSpec] | None = None,
         tenant_id: str | None = None,
+        target_document_version: str | None = None,
     ) -> Task:
         _log.info(
             f"[TENANT_ID] _enqueue_file called with tenant_id='{tenant_id}', "
@@ -645,6 +658,7 @@ def create_app():  # noqa: C901
             targets=[target],
             callbacks=callbacks or [],
             metadata=metadata,
+            target_document_version=target_document_version,
         )
 
         _log.info(
@@ -652,6 +666,36 @@ def create_app():  # noqa: C901
         )
 
         return task
+
+    def _validate_accept_doc_version(accept_doc_version: str | None) -> None:
+        """Reject an Accept-Docling-Document-Version below the projector floor.
+
+        Fails fast with a clean 422 for the unambiguous case (target below every
+        projector path). The worker's ``project_to`` raise is the backstop for
+        the rare cross-version deployment where the target sits between floor and
+        the server's native version.
+        """
+        if not accept_doc_version:
+            return
+        m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", accept_doc_version)
+        if m is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=(
+                    f"unparseable Accept-Docling-Document-Version "
+                    f"'{accept_doc_version}'"
+                ),
+            )
+        major, minor = int(m.group(1)), int(m.group(2))
+        if (major, minor) < (1, FIRST_SUPPORTED_MINOR):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=(
+                    f"unsupported Accept-Docling-Document-Version "
+                    f"'{accept_doc_version}'; oldest supported is "
+                    f"1.{FIRST_SUPPORTED_MINOR}.0"
+                ),
+            )
 
     def _get_tenant_id_from_header(tenant_id_header: str | None) -> str:
         """Extract tenant_id from header or return default."""
@@ -895,16 +939,23 @@ def create_app():  # noqa: C901
         background_tasks: BackgroundTasks,
         auth: Annotated[AuthenticationResult, Depends(require_auth)],
         orchestrator: Annotated[BaseOrchestrator, Depends(get_async_orchestrator)],
-        conversion_request: ConvertSourcesRequestModel,
+        conversion_request: ConvertSourcesRequestModel,  # ty: ignore[invalid-type-form]
         x_tenant_id: Annotated[
             str | None, Header(alias=docling_serve_settings.eng_ray_tenant_id_header)
+        ] = None,
+        accept_doc_version: Annotated[
+            str | None, Header(alias="Accept-Docling-Document-Version")
         ] = None,
     ):
         prepared_request = _prepare_convert_request(conversion_request)
         tenant_id = _get_tenant_id_from_header(x_tenant_id)
+        _validate_accept_doc_version(accept_doc_version)
         _log.info(f"[TENANT_ID] process_url endpoint received tenant_id='{tenant_id}'")
         task = await _enqueue_source(
-            orchestrator=orchestrator, request=prepared_request, tenant_id=tenant_id
+            orchestrator=orchestrator,
+            request=prepared_request,
+            tenant_id=tenant_id,
+            target_document_version=accept_doc_version,
         )
         completed = await _wait_task_complete(
             orchestrator=orchestrator, task_id=task.task_id
@@ -928,6 +979,7 @@ def create_app():  # noqa: C901
             task_result=task_result,
             orchestrator=orchestrator,
             background_tasks=background_tasks,
+            target_document_version=task.target_document_version,
         )
         return response
 
@@ -967,11 +1019,15 @@ def create_app():  # noqa: C901
         x_tenant_id: Annotated[
             str | None, Header(alias=docling_serve_settings.eng_ray_tenant_id_header)
         ] = None,
+        accept_doc_version: Annotated[
+            str | None, Header(alias="Accept-Docling-Document-Version")
+        ] = None,
     ):
         _check_file_upload(files, target_type)
         options = _prepare_convert_options(options)
         _validate_multipart_target_type(target_type)
         tenant_id = _get_tenant_id_from_header(x_tenant_id)
+        _validate_accept_doc_version(accept_doc_version)
         _log.info(f"[TENANT_ID] process_file endpoint received tenant_id='{tenant_id}'")
         target = _resolve_file_target(target_type)
         callbacks = [parse_callback_item(v) for v in callbacks_raw]
@@ -985,6 +1041,7 @@ def create_app():  # noqa: C901
             target=target,
             callbacks=callbacks,
             tenant_id=tenant_id,
+            target_document_version=accept_doc_version,
         )
         completed = await _wait_task_complete(
             orchestrator=orchestrator, task_id=task.task_id
@@ -1008,6 +1065,7 @@ def create_app():  # noqa: C901
             task_result=task_result,
             orchestrator=orchestrator,
             background_tasks=background_tasks,
+            target_document_version=task.target_document_version,
         )
         return response
 
@@ -1020,18 +1078,25 @@ def create_app():  # noqa: C901
     async def process_url_async(
         auth: Annotated[AuthenticationResult, Depends(require_auth)],
         orchestrator: Annotated[BaseOrchestrator, Depends(get_async_orchestrator)],
-        conversion_request: ConvertSourcesRequestModel,
+        conversion_request: ConvertSourcesRequestModel,  # ty: ignore[invalid-type-form]
         x_tenant_id: Annotated[
             str | None, Header(alias=docling_serve_settings.eng_ray_tenant_id_header)
+        ] = None,
+        accept_doc_version: Annotated[
+            str | None, Header(alias="Accept-Docling-Document-Version")
         ] = None,
     ):
         prepared_request = _prepare_convert_request(conversion_request)
         tenant_id = _get_tenant_id_from_header(x_tenant_id)
+        _validate_accept_doc_version(accept_doc_version)
         _log.info(
             f"[TENANT_ID] process_url_async endpoint received tenant_id='{tenant_id}'"
         )
         task = await _enqueue_source(
-            orchestrator=orchestrator, request=prepared_request, tenant_id=tenant_id
+            orchestrator=orchestrator,
+            request=prepared_request,
+            tenant_id=tenant_id,
+            target_document_version=accept_doc_version,
         )
         task_queue_position = await orchestrator.get_queue_position(
             task_id=task.task_id
@@ -1039,7 +1104,7 @@ def create_app():  # noqa: C901
         return TaskStatusResponse(
             task_id=task.task_id,
             task_type=task.task_type,
-            task_status=task.task_status,
+            task_status=ConversionStatus(task.task_status.value),
             task_position=task_queue_position,
             task_meta=task.processing_meta,
             error_message=task.error_message,
@@ -1054,13 +1119,17 @@ def create_app():  # noqa: C901
     async def process_source_batch(
         auth: Annotated[AuthenticationResult, Depends(require_auth)],
         orchestrator: Annotated[BaseOrchestrator, Depends(get_async_orchestrator)],
-        conversion_request: BatchConvertSourcesRequestModel,
+        conversion_request: BatchConvertSourcesRequestModel,  # ty: ignore[invalid-type-form]
         x_tenant_id: Annotated[
             str | None, Header(alias=docling_serve_settings.eng_ray_tenant_id_header)
+        ] = None,
+        accept_doc_version: Annotated[
+            str | None, Header(alias="Accept-Docling-Document-Version")
         ] = None,
     ):
         conversion_request = _prepare_batch_convert_request(conversion_request)
         tenant_id = _get_tenant_id_from_header(x_tenant_id)
+        _validate_accept_doc_version(accept_doc_version)
         _log.info(
             f"[TENANT_ID] process_source_batch endpoint received tenant_id='{tenant_id}'"
         )
@@ -1068,6 +1137,7 @@ def create_app():  # noqa: C901
             orchestrator=orchestrator,
             request=conversion_request,
             tenant_id=tenant_id,
+            target_document_version=accept_doc_version,
         )
         task_queue_position = await orchestrator.get_queue_position(
             task_id=task.task_id
@@ -1075,7 +1145,7 @@ def create_app():  # noqa: C901
         return TaskStatusResponse(
             task_id=task.task_id,
             task_type=task.task_type,
-            task_status=task.task_status,
+            task_status=ConversionStatus(task.task_status.value),
             task_position=task_queue_position,
             task_meta=task.processing_meta,
             error_message=task.error_message,
@@ -1111,11 +1181,15 @@ def create_app():  # noqa: C901
         x_tenant_id: Annotated[
             str | None, Header(alias=docling_serve_settings.eng_ray_tenant_id_header)
         ] = None,
+        accept_doc_version: Annotated[
+            str | None, Header(alias="Accept-Docling-Document-Version")
+        ] = None,
     ):
         _check_file_upload(files, target_type)
         options = _prepare_convert_options(options)
         _validate_multipart_target_type(target_type)
         tenant_id = _get_tenant_id_from_header(x_tenant_id)
+        _validate_accept_doc_version(accept_doc_version)
         _log.info(
             f"[TENANT_ID] process_file_async endpoint received tenant_id='{tenant_id}'"
         )
@@ -1131,6 +1205,7 @@ def create_app():  # noqa: C901
             target=target,
             callbacks=callbacks,
             tenant_id=tenant_id,
+            target_document_version=accept_doc_version,
         )
         task_queue_position = await orchestrator.get_queue_position(
             task_id=task.task_id
@@ -1138,7 +1213,7 @@ def create_app():  # noqa: C901
         return TaskStatusResponse(
             task_id=task.task_id,
             task_type=task.task_type,
-            task_status=task.task_status,
+            task_status=ConversionStatus(task.task_status.value),
             task_position=task_queue_position,
             task_meta=task.processing_meta,
             error_message=task.error_message,
@@ -1182,7 +1257,7 @@ def create_app():  # noqa: C901
             return TaskStatusResponse(
                 task_id=task.task_id,
                 task_type=task.task_type,
-                task_status=task.task_status,
+                task_status=ConversionStatus(task.task_status.value),
                 task_position=task_queue_position,
                 task_meta=task.processing_meta,
                 error_message=task.error_message,
@@ -1238,6 +1313,7 @@ def create_app():  # noqa: C901
                     status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                     detail="presigned_url target is not supported for chunk endpoints.",
                 )
+            _check_file_upload(files, target_type)
             convert_options = _prepare_convert_options(convert_options)
             _validate_multipart_target_type(target_type)
             tenant_id = _get_tenant_id_from_header(x_tenant_id)
@@ -1264,7 +1340,7 @@ def create_app():  # noqa: C901
             return TaskStatusResponse(
                 task_id=task.task_id,
                 task_type=task.task_type,
-                task_status=task.task_status,
+                task_status=ConversionStatus(task.task_status.value),
                 task_position=task_queue_position,
                 task_meta=task.processing_meta,
                 error_message=task.error_message,
@@ -1380,6 +1456,7 @@ def create_app():  # noqa: C901
                     status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                     detail="presigned_url target is not supported for chunk endpoints.",
                 )
+            _check_file_upload(files, target_type)
             convert_options = _prepare_convert_options(convert_options)
             _validate_multipart_target_type(target_type)
             tenant_id = _get_tenant_id_from_header(x_tenant_id)
@@ -1538,7 +1615,7 @@ def create_app():  # noqa: C901
         return TaskStatusResponse(
             task_id=task.task_id,
             task_type=task.task_type,
-            task_status=task.task_status,
+            task_status=ConversionStatus(task.task_status.value),
             task_position=task_queue_position,
             task_meta=task.processing_meta,
             queue_size=queue_size,
@@ -1603,7 +1680,7 @@ def create_app():  # noqa: C901
             task_response = TaskStatusResponse(
                 task_id=task.task_id,
                 task_type=task.task_type,
-                task_status=task.task_status,
+                task_status=ConversionStatus(task.task_status.value),
                 task_position=task_queue_position,
                 task_meta=task.processing_meta,
                 error_message=task.error_message,
@@ -1625,7 +1702,7 @@ def create_app():  # noqa: C901
                 task_response = TaskStatusResponse(
                     task_id=task.task_id,
                     task_type=task.task_type,
-                    task_status=task.task_status,
+                    task_status=ConversionStatus(task.task_status.value),
                     task_position=task_queue_position,
                     task_meta=task.processing_meta,
                     error_message=task.error_message,
@@ -1713,6 +1790,7 @@ def create_app():  # noqa: C901
                 task_result=task_result,
                 orchestrator=orchestrator,
                 background_tasks=background_tasks,
+                target_document_version=task.target_document_version,
             )
             return response
         except TaskNotFoundError:
