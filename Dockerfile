@@ -20,7 +20,7 @@
 # like Zscaler will break the TLS handshake locally.)
 ARG PYTHON_MAJOR=3
 ARG PYTHON_MINOR=13
-ARG PYTHON_PATCH=16
+ARG PYTHON_PATCH=18
 ARG PYTHON_VERSION=${PYTHON_MAJOR}.${PYTHON_MINOR}.${PYTHON_PATCH}
 # Pin the base images by digest. The python-fips tags are mutable (Chainguard
 # re-pushes them with rebuilt packages every few days) and BuildKit keys every
@@ -30,8 +30,8 @@ ARG PYTHON_VERSION=${PYTHON_MAJOR}.${PYTHON_MINOR}.${PYTHON_PATCH}
 # by hand: `scripts/bump_base_image.sh <ver>` updates the version and both
 # digests together (and `--check` tells you if they are stale). The digests are
 # the multi-arch index digests, so one pin covers amd64 and arm64.
-ARG PYTHON_DEV_DIGEST=sha256:6dea4fb091515b32a5fd5cbaff991393a797eb0196520aea1dbf15f71c28480e
-ARG PYTHON_RUNTIME_DIGEST=sha256:29f8c6f064f81fb321e326afc2be0c8f39963c292030bcbccc37f5df29d3b8d5
+ARG PYTHON_DEV_DIGEST=sha256:f536a8c1fcb8199db8aaa071cc92181ae2c1838111f93b817b6d50fd607cd6e0
+ARG PYTHON_RUNTIME_DIGEST=sha256:b4feeefa5f61f6a1dc0151f12ac3f15b89fb7130ac8519e57a71a5cd376485e7
 FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:${PYTHON_VERSION}-dev@${PYTHON_DEV_DIGEST} AS opencv-builder
 USER 0
 # Install the packages the cv2 compile link-checks against. Keep this line
