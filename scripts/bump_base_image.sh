@@ -12,6 +12,10 @@
 #   scripts/bump_base_image.sh                 # refresh digests for the current version
 #   scripts/bump_base_image.sh 3.13.17         # bump version and refresh digests
 #   scripts/bump_base_image.sh --check         # exit 1 if the pinned digests are stale
+#   scripts/bump_base_image.sh --opencv        # also move the opencv-builder pin
+#                                              # (only needed for a Python minor
+#                                              # or OpenCV bump; it is the ~40 min
+#                                              # layer and is left alone otherwise)
 #
 # Needs either `docker buildx` or `skopeo` to read the registry (Nexus login
 # as for a normal `docker pull`).
@@ -21,10 +25,12 @@ REPO="nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips"
 DOCKERFILE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/Dockerfile"
 
 check_only=0
+bump_opencv=0
 version=""
 for arg in "$@"; do
   case "$arg" in
     --check) check_only=1 ;;
+    --opencv) bump_opencv=1 ;;
     -h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) version="$arg" ;;
   esac
@@ -36,6 +42,7 @@ set_arg()   { sed -i.bak -E "s|^ARG $1=.*$|ARG $1=$2|" "$DOCKERFILE" && rm -f "$
 cur_version="$(arg_value PYTHON_MAJOR).$(arg_value PYTHON_MINOR).$(arg_value PYTHON_PATCH)"
 cur_dev_digest="$(arg_value PYTHON_DEV_DIGEST)"
 cur_runtime_digest="$(arg_value PYTHON_RUNTIME_DIGEST)"
+cur_opencv_digest="$(arg_value OPENCV_BUILDER_DIGEST)"
 version="${version:-$cur_version}"
 if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "error: version must look like 3.13.17, got '$version'" >&2; exit 2
@@ -84,7 +91,13 @@ done
 echo "  $version-dev  -> $dev_digest"
 echo "  $version      -> $runtime_digest"
 
-if [[ "$version" == "$cur_version" && "$dev_digest" == "$cur_dev_digest" && "$runtime_digest" == "$cur_runtime_digest" ]]; then
+opencv_digest="$cur_opencv_digest"
+if (( bump_opencv )); then
+  opencv_digest="$dev_digest"
+  echo "  opencv-builder -> $opencv_digest"
+fi
+
+if [[ "$version" == "$cur_version" && "$dev_digest" == "$cur_dev_digest" && "$runtime_digest" == "$cur_runtime_digest" && "$opencv_digest" == "$cur_opencv_digest" ]]; then
   echo "Dockerfile pins are up to date."
   exit 0
 fi
@@ -94,6 +107,7 @@ if (( check_only )); then
   [[ "$version" != "$cur_version" ]]               && echo "  version        $cur_version -> $version" >&2
   [[ "$dev_digest" != "$cur_dev_digest" ]]         && echo "  dev digest     $cur_dev_digest -> $dev_digest" >&2
   [[ "$runtime_digest" != "$cur_runtime_digest" ]] && echo "  runtime digest $cur_runtime_digest -> $runtime_digest" >&2
+  [[ "$opencv_digest" != "$cur_opencv_digest" ]]   && echo "  opencv digest  $cur_opencv_digest -> $opencv_digest" >&2
   echo "Run scripts/bump_base_image.sh${version:+ $version} to refresh them." >&2
   exit 1
 fi
@@ -104,6 +118,7 @@ set_arg PYTHON_MINOR "$minor"
 set_arg PYTHON_PATCH "$patch"
 set_arg PYTHON_DEV_DIGEST "$dev_digest"
 set_arg PYTHON_RUNTIME_DIGEST "$runtime_digest"
+(( bump_opencv )) && set_arg OPENCV_BUILDER_DIGEST "$opencv_digest"
 echo "Updated $DOCKERFILE:"
 git -C "$(dirname "$DOCKERFILE")" --no-pager diff --stat -- Dockerfile 2>/dev/null || true
 echo "Next: build + grype the image, then commit (python-fips $cur_version -> $version)."
