@@ -32,7 +32,14 @@ ARG PYTHON_VERSION=${PYTHON_MAJOR}.${PYTHON_MINOR}.${PYTHON_PATCH}
 # the multi-arch index digests, so one pin covers amd64 and arm64.
 ARG PYTHON_DEV_DIGEST=sha256:f536a8c1fcb8199db8aaa071cc92181ae2c1838111f93b817b6d50fd607cd6e0
 ARG PYTHON_RUNTIME_DIGEST=sha256:b4feeefa5f61f6a1dc0151f12ac3f15b89fb7130ac8519e57a71a5cd376485e7
-FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:${PYTHON_VERSION}-dev@${PYTHON_DEV_DIGEST} AS opencv-builder
+# The OpenCV wheel depends on the Python minor (cp313 ABI) and the apk
+# toolchain, not on the patch-level base rebuilds the two pins above track.
+# It builds from its own digest pin so a routine base bump leaves the ~40 min
+# compile cached (registry cache in _docker-build.yaml). Refresh it only when
+# PYTHON_MINOR or OPENCV_HEADLESS_VERSION changes:
+# `scripts/bump_base_image.sh --opencv`.
+ARG OPENCV_BUILDER_DIGEST=sha256:f536a8c1fcb8199db8aaa071cc92181ae2c1838111f93b817b6d50fd607cd6e0
+FROM nexus.int.onebrief.tools/cgr.dev/onebrief.com/python-fips:${PYTHON_MAJOR}.${PYTHON_MINOR}-dev@${OPENCV_BUILDER_DIGEST} AS opencv-builder
 USER 0
 # Install the packages the cv2 compile link-checks against. Keep this line
 # stable — adding packages here invalidates the `pip wheel` layer below and

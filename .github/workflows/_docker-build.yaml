@@ -111,6 +111,20 @@ jobs:
           provenance: ${{ inputs.provenance }}
           outputs: |
             type=image,name=nexus.int.onebrief.tools/${{ inputs.image-name }},push-by-digest=true,name-canonical=true,push=true
+          # Layer cache in Nexus, one ref per arch. The /var/lib/docker snapshot
+          # above is keyed by git ref (PR refs never feed main or release builds,
+          # and a failed job leaves no snapshot), so without this every release
+          # built from scratch (~60 min, 38 of them compiling OpenCV). BuildKit
+          # matches cached layers by content, so a ref that shares the base
+          # digest reuses them regardless of which branch built them. mode=max
+          # also caches the intermediate stages (opencv-builder, build).
+          # image-manifest/oci-mediatypes make the cache an OCI image manifest,
+          # which registries that reject BuildKit's native cache manifest accept;
+          # ignore-error keeps a cache push failure from failing the build.
+          cache-from: |
+            type=registry,ref=nexus.int.onebrief.tools/${{ inputs.image-name }}:buildcache-${{ matrix.arch }}
+          cache-to: |
+            type=registry,ref=nexus.int.onebrief.tools/${{ inputs.image-name }}:buildcache-${{ matrix.arch }},mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true
           build-args: |
             GIT_COMMIT=${{ github.sha }}
             VERSION=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.version'] }}
