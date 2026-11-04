@@ -111,20 +111,24 @@ jobs:
           provenance: ${{ inputs.provenance }}
           outputs: |
             type=image,name=nexus.int.onebrief.tools/${{ inputs.image-name }},push-by-digest=true,name-canonical=true,push=true
-          # Layer cache in Nexus, one ref per arch. The /var/lib/docker snapshot
-          # above is keyed by git ref (PR refs never feed main or release builds,
-          # and a failed job leaves no snapshot), so without this every release
-          # built from scratch (~60 min, 38 of them compiling OpenCV). BuildKit
-          # matches cached layers by content, so a ref that shares the base
-          # digest reuses them regardless of which branch built them. mode=max
-          # also caches the intermediate stages (opencv-builder, build).
-          # image-manifest/oci-mediatypes make the cache an OCI image manifest,
-          # which registries that reject BuildKit's native cache manifest accept;
-          # ignore-error keeps a cache push failure from failing the build.
+          # Layer cache in the RunsOn S3 cache bucket, one prefix per arch. The
+          # /var/lib/docker snapshot above is keyed by git ref (PR refs never feed
+          # main or release builds, and a failed job leaves no snapshot), so without
+          # this every release built from scratch (~60 min, 38 of them compiling
+          # OpenCV). BuildKit matches cached layers by content, so a ref that shares
+          # the base digest reuses them regardless of which branch built them.
+          # mode=max also caches the intermediate stages (opencv-builder, build).
+          # S3 rather than Nexus: pushing the multi-GB cache blobs to Nexus failed
+          # twice with "Missing OCI upload with uuid" (NEXUS-20640, a race in
+          # concurrent blob uploads). The runners carry the s3-cache extra, so the
+          # bucket, region and per-repo prefix (RUNS_ON_S3_CACHE_REPO_PREFIX, the
+          # path the instance role is allowed to write) come from the runs-on/action
+          # env; ignore-error keeps a cache export failure from
+          # failing the build.
           cache-from: |
-            type=registry,ref=nexus.int.onebrief.tools/${{ inputs.image-name }}:buildcache-${{ matrix.arch }}
+            type=s3,region=${{ env.RUNS_ON_AWS_REGION }},bucket=${{ env.RUNS_ON_S3_BUCKET_CACHE }},blobs_prefix=${{ env.RUNS_ON_S3_CACHE_REPO_PREFIX }}/buildkit/${{ inputs.image-name }}/blobs/,manifests_prefix=${{ env.RUNS_ON_S3_CACHE_REPO_PREFIX }}/buildkit/${{ inputs.image-name }}/manifests-${{ matrix.arch }}/
           cache-to: |
-            type=registry,ref=nexus.int.onebrief.tools/${{ inputs.image-name }}:buildcache-${{ matrix.arch }},mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true
+            type=s3,region=${{ env.RUNS_ON_AWS_REGION }},bucket=${{ env.RUNS_ON_S3_BUCKET_CACHE }},blobs_prefix=${{ env.RUNS_ON_S3_CACHE_REPO_PREFIX }}/buildkit/${{ inputs.image-name }}/blobs/,manifests_prefix=${{ env.RUNS_ON_S3_CACHE_REPO_PREFIX }}/buildkit/${{ inputs.image-name }}/manifests-${{ matrix.arch }}/,mode=max,ignore-error=true
           build-args: |
             GIT_COMMIT=${{ github.sha }}
             VERSION=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.version'] }}
