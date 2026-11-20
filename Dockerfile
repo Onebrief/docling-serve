@@ -30,8 +30,8 @@ ARG PYTHON_VERSION=${PYTHON_MAJOR}.${PYTHON_MINOR}.${PYTHON_PATCH}
 # by hand: `scripts/bump_base_image.sh <ver>` updates the version and both
 # digests together (and `--check` tells you if they are stale). The digests are
 # the multi-arch index digests, so one pin covers amd64 and arm64.
-ARG PYTHON_DEV_DIGEST=sha256:f536a8c1fcb8199db8aaa071cc92181ae2c1838111f93b817b6d50fd607cd6e0
-ARG PYTHON_RUNTIME_DIGEST=sha256:b4feeefa5f61f6a1dc0151f12ac3f15b89fb7130ac8519e57a71a5cd376485e7
+ARG PYTHON_DEV_DIGEST=sha256:382179cf5a474d6d4f3524f1104cd38f7ba6f67a84429ba1bc9c11a6bc99d43c
+ARG PYTHON_RUNTIME_DIGEST=sha256:988a90594f265fd4431fb397de1c464db4158f7ecdb7aa837f95d82793b08922
 # The OpenCV wheel depends on the Python minor (cp313 ABI) and the apk
 # toolchain, not on the patch-level base rebuilds the two pins above track.
 # It builds from its own digest pin so a routine base bump leaves the ~40 min
